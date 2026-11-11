@@ -1,147 +1,173 @@
+"""Compile and measure individual MetaSchedule traces."""
+from __future__ import annotations
 
-"""Tune and benchmark one matmul with TVM MetaSchedule, then save the results."""
-import json
-from pathlib import Path
+from dataclasses import dataclass, field
+from functools import lru_cache
+import logging
 import time
+from typing import Any
 
 import numpy as np
 import tvm
 from tvm import te
 from tvm.s_tir import meta_schedule as ms
 
-# ---------------------------------------------------------------
-# Settings. Only TARGET and RUNNER change when you move to the Pi.
-# ---------------------------------------------------------------
-N = 512                                                      # matrix size (N x N)
-TARGET = tvm.target.Target({"kind": "llvm", "num-cores": 4}) # Mac CPU for now
-RUNNER = "local"                                             # later: an RPC runner pointing at the Pi
-STRATEGY = "evolutionary"                                    # search strategy under test (replay-trace for random search)
-MAX_TRIALS = 64                                              # total trial budget
-TRIALS_PER_ITER = 16                                         # 64 / 16 = 4 rounds of search
-SEED = 0
-REPO_DIR = Path(__file__).resolve().parent.parent
-WORK_DIR = REPO_DIR / f"logs/raw/{STRATEGY}_n{N}_t{MAX_TRIALS}_s{SEED}"
-RESULTS_DIR = REPO_DIR / "results"
-RESULTS_FILENAME = f"{STRATEGY}_n{N}_t{MAX_TRIALS}_s{SEED}.json"
-REPEATS = 20                                                 # number of timing samples; result uses their median
-NUMBER = 10                                                  # runs averaged within each timing sample
+LOGGER = logging.getLogger(__name__)
 
 
-def make_matmul(n):
+@dataclass(frozen=True)
+class HarnessConfig:
+    n: int = 512
+    target: Any = field(
+        default_factory=lambda: tvm.target.Target(
+            {"kind": "llvm", "mcpu": "apple-m2", "num-cores": 4}
+        )
+    )
+    repeats: int = 5
+    number: int = 1
+    min_repeat_ms: int = 10
+    seed: int = 0
+    slow_threshold_ms: float = 1000.0
+
+    def __post_init__(self) -> None:
+        if self.n < 1:
+            raise ValueError("n must be positive")
+        if self.repeats < 1 or self.number < 1:
+            raise ValueError("repeats and number must be positive")
+        if self.min_repeat_ms < 0:
+            raise ValueError("min_repeat_ms must be non-negative")
+        if not self.slow_threshold_ms > 0:
+            raise ValueError("slow_threshold_ms must be positive")
+        if self.seed < 0:
+            raise ValueError("seed must be non-negative")
+
+
+@dataclass(frozen=True)
+class TimingResult:
+    repeats_ms: tuple[float, ...]
+    median_ms: float
+    std_ms: float
+    status: str
+
+
+def make_matmul(n: int) -> tvm.tirx.PrimFunc:
     """Return a TIR PrimFunc computing C = A @ B for n x n float32 matrices."""
-
-    A = te.placeholder((n, n), dtype="float32", name="A")
-    B = te.placeholder((n, n), dtype="float32", name="B")
+    a = te.placeholder((n, n), dtype="float32", name="A")
+    b = te.placeholder((n, n), dtype="float32", name="B")
     k = te.reduce_axis((0, n), name="k")
-    C = te.compute((n, n), lambda i, j: te.sum(A[i, k] * B[k, j], axis=k), name="C")
+    c = te.compute((n, n), lambda i, j: te.sum(a[i, k] * b[k, j], axis=k), name="C")
+    return te.create_prim_func([a, b, c])
 
-    return te.create_prim_func([A, B, C])
 
-
-def time_module(lib, n):
-    """Return the median runtime in milliseconds of a compiled matmul module."""
-
-    dev = tvm.cpu()
-    to_dev = getattr(tvm.runtime, "tensor", None) or tvm.nd.array
-    rng = np.random.default_rng(SEED)
+@lru_cache(maxsize=8)
+def _cached_inputs(n: int, seed: int) -> tuple[Any, Any, Any, np.ndarray]:
+    device = tvm.cpu()
+    to_device = getattr(tvm.runtime, "tensor", None) or tvm.nd.array
+    rng = np.random.default_rng(seed)
     a_np = rng.random((n, n), dtype=np.float32)
     b_np = rng.random((n, n), dtype=np.float32)
-    a, b = to_dev(a_np, dev), to_dev(b_np, dev)
-    c = to_dev(np.zeros((n, n), dtype="float32"), dev)
-
-    mod = lib.jit()
-    entry = mod["main"]
-    # Run correctness once before timing; this also warms the entry point.
-    entry(a, b, c)
-    np.testing.assert_allclose(c.numpy(), a_np @ b_np, rtol=1e-4, atol=1e-4)
-
-    result = mod.time_evaluator("main", dev, repeat=REPEATS, number=NUMBER)(a, b, c)
-    return result.median * 1000.0
-
-def time_untuned(func):
-    """Compile with no tuning and return its runtime (ms). This is your floor."""
-
-    lib = tvm.compile(func, target=TARGET)
-    return time_module(lib, N)
+    reference = a_np @ b_np
+    a = to_device(a_np, device)
+    b = to_device(b_np, device)
+    c = to_device(np.zeros((n, n), dtype="float32"), device)
+    return a, b, c, reference
 
 
-def tune(func):
-    """Run MetaSchedule with the configured search strategy and return the database."""
+def prepare_inputs(config: HarnessConfig) -> tuple[Any, Any, Any, np.ndarray]:
+    """Return cached device inputs and their NumPy reference result."""
+    return _cached_inputs(config.n, config.seed)
 
-    return ms.tune_tir(
-        mod=func,
-        target=TARGET,
-        work_dir=str(WORK_DIR),
-        max_trials_global=MAX_TRIALS,
-        num_trials_per_iter=TRIALS_PER_ITER,
-        runner=RUNNER,
-        seed=SEED,
-        space="post-order-apply",
-        cost_model="xgb",
-        strategy=STRATEGY,
-        builder="local",
-        database="json",
+
+def _zero_output(c: Any, config: HarnessConfig) -> None:
+    c.copyfrom(np.zeros((config.n, config.n), dtype="float32"))
+
+
+def _stats(values: tuple[float, ...], status: str) -> TimingResult:
+    return TimingResult(
+        repeats_ms=values,
+        median_ms=float(np.median(values)),
+        std_ms=float(np.std(values)),
+        status=status,
     )
 
 
-def time_tuned(database, func):
-    """Compile and return the runtime (ms) of the best schedule found."""
-    
-    sch = ms.tir_integration.compile_tir(database, func, TARGET)
-    if sch is None:
-        raise RuntimeError(f"Tuning found no valid schedule; check the logs in {WORK_DIR}")
-    lib = tvm.compile(sch.mod, target=TARGET)
-    return time_module(lib, N)
+def time_module(lib: Any, config: HarnessConfig) -> TimingResult:
+    """Check correctness and time a compiled module using a consistent protocol."""
+    a, b, c, reference = prepare_inputs(config)
+    device = tvm.cpu()
+    mod = lib if hasattr(lib, "time_evaluator") else lib.jit()
+    entry = mod["main"]
+    _zero_output(c, config)
+    entry(a, b, c)
+    try:
+        np.testing.assert_allclose(c.numpy(), reference, rtol=1e-4, atol=1e-4)
+    except AssertionError:
+        LOGGER.exception("Compiled schedule returned an incorrect result")
+        return TimingResult((), float("nan"), float("nan"), "wrong_result")
+
+    _zero_output(c, config)
+    single_start = time.perf_counter()
+    entry(a, b, c)
+    single_ms = (time.perf_counter() - single_start) * 1000.0
+    if single_ms > config.slow_threshold_ms:
+        return _stats((single_ms,), "slow_skip")
+
+    _zero_output(c, config)
+    result = mod.time_evaluator(
+        "main",
+        device,
+        repeat=config.repeats,
+        number=config.number,
+        min_repeat_ms=config.min_repeat_ms,
+    )(a, b, c)
+    repeats_ms = tuple(float(value) * 1000.0 for value in result.results)
+    return _stats(repeats_ms, "ok")
 
 
-def save_results(results):
-    """Write settings and measured runtimes to the tracked results directory.
+def _schedule_from_position(
+    position: np.ndarray,
+    design_space_trace: Any,
+    layout: dict[str, Any],
+    config: HarnessConfig,
+) -> Any:
+    from dvcm.encoding import position_to_decisions
 
-    ``results`` should contain the untuned_ms, tuned_ms, and speedup values.
-    """
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = RESULTS_DIR / RESULTS_FILENAME
-
-    data = {
-        "settings": {
-            "N": N,
-            "TARGET": json.loads(str(TARGET)),
-            "STRATEGY": STRATEGY,
-            "TVM_VERSION": tvm.__version__,
-            "MAX_TRIALS": MAX_TRIALS,
-            "TRIALS_PER_ITER": TRIALS_PER_ITER,
-            "SEED": SEED,
-            "REPEATS": REPEATS,
-            "NUMBER": NUMBER,
-        },
-        **results,
-    }
-    with output_path.open("w", encoding="utf-8") as result_file:
-        json.dump(data, result_file, indent=2)
-        result_file.write("\n")
-    return output_path
+    trace = position_to_decisions(position, design_space_trace, layout)
+    if not hasattr(design_space_trace, "trace"):
+        raise ValueError("design_space_trace must be a MetaSchedule Schedule")
+    schedule = tvm.s_tir.Schedule(make_matmul(config.n), seed=max(1, config.seed))
+    trace.apply_to_schedule(schedule, remove_postproc=False)
+    for postproc in ms.Postproc.create("llvm"):
+        if not postproc.apply(schedule):
+            raise ValueError(f"LLVM postprocessor rejected schedule: {postproc}")
+    return schedule
 
 
-if __name__ == "__main__":  # required on macOS: the local runner spawns processes
-    if WORK_DIR.exists():
-        raise SystemExit(
-            f"Tuning directory already exists: {WORK_DIR}. "
-            "Delete it or change the settings before running again."
-        )
+def build_from_position(
+    position: np.ndarray,
+    design_space_trace: Any,
+    layout: dict[str, Any],
+    config: HarnessConfig,
+) -> tuple[Any | None, str]:
+    """Replay a position on a fresh schedule and compile it for the configured target."""
+    try:
+        schedule = _schedule_from_position(position, design_space_trace, layout, config)
+        return tvm.compile(schedule.mod, target=config.target), "ok"
+    except Exception:
+        LOGGER.exception("Failed to build encoded schedule")
+        return None, "build_fail"
 
-    func = make_matmul(N)
-    untuned_ms = time_untuned(func)
-    tuning_start = time.perf_counter()
-    database = tune(func)
-    tuning_wall_time_seconds = time.perf_counter() - tuning_start
-    tuned_ms = time_tuned(database, func)
-    speedup = untuned_ms / tuned_ms
 
-    print(f"untuned {untuned_ms:.3f} ms -> tuned {tuned_ms:.3f} ms ({speedup:.2f}x speedup)")
-    results_path = save_results({
-        "untuned_ms": untuned_ms,
-        "tuned_ms": tuned_ms,
-        "speedup": speedup,
-        "tuning_wall_time_seconds": tuning_wall_time_seconds,
-    })
-    print(f"Results saved to {results_path}")
+def measure(
+    position: np.ndarray,
+    design_space_trace: Any,
+    layout: dict[str, Any],
+    config: HarnessConfig,
+) -> tuple[TimingResult, float]:
+    """Build and measure one schedule, returning timing and build duration."""
+    start = time.perf_counter()
+    lib, status = build_from_position(position, design_space_trace, layout, config)
+    build_time_s = time.perf_counter() - start
+    if lib is None:
+        return TimingResult((), float("nan"), float("nan"), status), build_time_s
+    return time_module(lib, config), build_time_s
