@@ -71,10 +71,13 @@ as lower-confidence and call this out when interpreting results. Run metadata
 reports the observed fraction.
 
 Evaluation CSVs and PDFs are written under [`results/`](./results/). The
-generated measurements are intentionally excluded from Git. Before submission,
-publish `pool.parquet`, `splits.json`, and `run_meta.json` together as a
-downloadable release asset and replace this sentence with its public URL.
-`data/` contains the local run used for the reported results.
+generated measurements are intentionally excluded from Git. The public
+[`study-data-v1` release](https://github.com/Soutehkeshan/draft-verify-cpu-cost-models/releases/tag/study-data-v1)
+contains the local run used for the reported results; download the
+[dataset bundle](https://github.com/Soutehkeshan/draft-verify-cpu-cost-models/releases/download/study-data-v1/submission_bundle.zip).
+It includes `pool.parquet`, `splits.json`, `run_meta.json`, and the per-sketch
+layout files. The corresponding study code is pinned at
+[commit `1b130ca`](https://github.com/Soutehkeshan/draft-verify-cpu-cost-models/tree/1b130ca).
 
 `results/evaluation.csv` reports all five scorers pooled and separately for
 each sketch. Its Top-k latency ratio is the mean measured latency among the
