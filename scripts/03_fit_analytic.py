@@ -3,6 +3,7 @@
 """Fit analytic hardware constants using only the training split."""
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -12,17 +13,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.analytic import AnalyticConstants, fit_constants
+from dvcm.provenance import capture_provenance, write_json
 from dvcm.study import (
     RESULTS_DIR,
     load_layouts,
     load_pool,
     load_splits,
-    save_json,
     validate_splits,
 )
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-dirty", action="store_true")
+    args = parser.parse_args()
+    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+
     frame = load_pool()
     splits = load_splits()
     validate_splits(splits, set(frame["id"].astype(int)))
@@ -63,7 +69,7 @@ def main() -> None:
             )
         },
     }
-    save_json(RESULTS_DIR / "constants.json", payload)
+    write_json(RESULTS_DIR / "constants.json", payload, provenance)
     print(f"Fitted analytic constants on {len(train)} training schedules")
     for name in fitted_names:
         print(

@@ -3,6 +3,7 @@
 """Tune XGBoost settings on validation data and train nested learning curves."""
 from __future__ import annotations
 
+import argparse
 import itertools
 import sys
 from pathlib import Path
@@ -15,12 +16,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from dvcm.analytic import AnalyticConstants, latency_seconds
 from dvcm.features import features
 from dvcm.learned import train_xgb
+from dvcm.provenance import capture_provenance, write_companion, write_json
 from dvcm.study import (
     RESULTS_DIR,
     load_layouts,
     load_pool,
     load_splits,
-    save_json,
     validate_splits,
 )
 
@@ -43,6 +44,11 @@ def _rmse(y_true, prediction):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-dirty", action="store_true")
+    args = parser.parse_args()
+    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+
     frame = load_pool()
     splits = load_splits()
     validate_splits(splits, set(frame["id"].astype(int)))
@@ -114,10 +120,13 @@ def main() -> None:
                     n_estimators=best["n_estimators"],
                     seed=seed,
                 )
-                model.save_model(
-                    model_dir / f"{feature_set}_n{size_name}_seed{seed}.json"
+                model_path = model_dir / f"{feature_set}_n{size_name}_seed{seed}.json"
+                model.get_booster().set_attr(
+                    provenance=json.dumps(provenance, sort_keys=True)
                 )
-    save_json(
+                model.save_model(model_path)
+                write_companion(model_path, provenance)
+    write_json(
         RESULTS_DIR / "training_grid.json",
         {
             "grid": grid,
@@ -130,6 +139,7 @@ def main() -> None:
                 "random_seeds": list(range(5)),
             },
         },
+        provenance,
     )
     print(
         f"Trained 5-seed nested models using {len(train_frame)} training "
