@@ -75,6 +75,33 @@ def _sampling_instructions(trace):
     return tile_insts, categorical_insts, ordered_insts
 
 
+def _parallel_tile_levels(trace, tiles):
+    split_insts = [inst for inst in trace.insts if inst.kind.name == "Split"]
+    if len(split_insts) != len(tiles):
+        raise ValueError("Could not match sampled tiles to their split loops")
+    if len(tiles) != 3 or tiles[0]["n"] < 2 or tiles[1]["n"] < 2:
+        raise ValueError("Parallel-loop inference requires the i, j, k SSRSRS tiling")
+
+    j_split = split_insts[1]
+    placements = [
+        inst
+        for inst in trace.insts
+        if inst.kind.name == "ReverseComputeAt"
+    ]
+    if len(placements) > 1:
+        raise ValueError("Expected at most one cache-write placement")
+    if not placements:
+        if any(inst.kind.name == "CacheWrite" for inst in trace.insts):
+            raise ValueError("CacheWrite trace is missing its ReverseComputeAt placement")
+        return {"i": 2, "j": 2}
+
+    target_loop = placements[0].inputs[1]
+    for level, output in enumerate(j_split.outputs):
+        if target_loop == output:
+            return {"i": level + 1, "j": level + 1}
+    raise ValueError("Cache-write placement does not target a sampled j loop")
+
+
 def describe_space(design_space_trace):
     """Describe encoded sampling instructions in a design-space trace.
 
@@ -132,7 +159,12 @@ def describe_space(design_space_trace):
         raise ValueError("Trace contains no SamplePerfectTile instructions")
     if not categoricals:
         raise ValueError("Trace contains no SampleCategorical instructions")
-    return {"tiles": tiles, "categoricals": categoricals, "dim": offset}
+    return {
+        "tiles": tiles,
+        "categoricals": categoricals,
+        "dim": offset,
+        "parallel_tile_levels": _parallel_tile_levels(trace, tiles),
+    }
 
 
 def repair_tile(exps, total=TOTAL_EXP, max_inner=MAX_INNER_EXP):

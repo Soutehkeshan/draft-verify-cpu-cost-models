@@ -12,6 +12,12 @@ ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
 RESULTS_DIR = ROOT / "results"
 POOL_PATH = DATA_DIR / "pool.parquet"
+# Compatibility for layouts collected before parallel-loop metadata was serialized.
+_LEGACY_PARALLEL_TILE_LEVELS = {
+    0: {"i": 2, "j": 2},
+    1: {"i": 1, "j": 1},
+    2: {"i": 2, "j": 2},
+}
 
 
 def load_layouts() -> dict[int, dict[str, Any]]:
@@ -20,7 +26,16 @@ def load_layouts() -> dict[int, dict[str, Any]]:
     for path in sorted(DATA_DIR.glob("layout_*.json")):
         sketch_id = int(path.stem.removeprefix("layout_"))
         with path.open(encoding="utf-8") as source:
-            layouts[sketch_id] = json.load(source)
+            layout = json.load(source)
+        if "parallel_tile_levels" not in layout:
+            try:
+                layout["parallel_tile_levels"] = _LEGACY_PARALLEL_TILE_LEVELS[sketch_id]
+            except KeyError as error:
+                raise ValueError(
+                    f"Legacy layout {path} lacks parallel-loop metadata"
+                ) from error
+        layout.setdefault("vector_registers", 32)
+        layouts[sketch_id] = layout
     if not layouts:
         raise FileNotFoundError(f"No layout_*.json files found in {DATA_DIR}")
     return layouts
@@ -65,6 +80,44 @@ def load_splits() -> dict[str, Any]:
         raise FileNotFoundError(f"Split file not found: {path}; run make models")
     with path.open(encoding="utf-8") as source:
         return json.load(source)
+
+
+def validate_splits(splits: dict[str, Any], sample_ids: set[int]) -> None:
+    """Require disjoint, exhaustive schedule splits and nested TRAIN subsets."""
+    partition_names = ("train", "validation", "test")
+    partitions = {
+        name: {int(value) for value in splits[name]}
+        for name in partition_names
+    }
+    for index, name in enumerate(partition_names):
+        for other in partition_names[index + 1 :]:
+            overlap = partitions[name] & partitions[other]
+            if overlap:
+                raise ValueError(f"{name} and {other} overlap at schedule IDs {sorted(overlap)[:5]}")
+    combined = set().union(*partitions.values())
+    if combined != sample_ids:
+        missing = sorted(sample_ids - combined)[:5]
+        extra = sorted(combined - sample_ids)[:5]
+        raise ValueError(f"Split IDs do not match samples; missing={missing}, extra={extra}")
+
+    train_ids = partitions["train"]
+    nested = {
+        name: {int(value) for value in values}
+        for name, values in splits["nested_train"].items()
+    }
+    if any(not ids <= train_ids for ids in nested.values()):
+        raise ValueError("Nested training subsets must be contained in TRAIN")
+    ordered = sorted(
+        ((len(ids), name, ids) for name, ids in nested.items() if name != "all"),
+        key=lambda item: item[0],
+    )
+    previous: set[int] = set()
+    for _, name, ids in ordered:
+        if not previous <= ids:
+            raise ValueError(f"Nested training subset {name} is not nested")
+        previous = ids
+    if "all" in nested and nested["all"] != train_ids:
+        raise ValueError("The 'all' nested training subset must equal TRAIN")
 
 
 def save_json(path: Path, payload: Any) -> None:

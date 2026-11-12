@@ -77,6 +77,18 @@ def test_position_trace_round_trip_and_features():
         assert np.all(np.isfinite(base_features))
 
 
+def test_layout_records_sketch_specific_parallel_loop_prefix():
+    actual = [
+        describe_space(schedule.trace)["parallel_tile_levels"]
+        for schedule in _design_spaces()
+    ]
+    assert actual == [
+        {"i": 2, "j": 2},
+        {"i": 1, "j": 1},
+        {"i": 2, "j": 2},
+    ]
+
+
 def test_repair_tile_enforces_composition():
     repaired = repair_tile(np.array([100.0, -5.0, 0.1, 0.0]), total=9, max_inner=5)
     assert repaired.sum() == 9

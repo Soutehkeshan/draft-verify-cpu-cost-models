@@ -11,7 +11,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dvcm.study import DATA_DIR, load_pool, save_json
+from dvcm.study import DATA_DIR, load_pool, save_json, validate_splits
 
 
 def main() -> None:
@@ -44,6 +44,7 @@ def main() -> None:
         "test": sorted(test),
         "nested_train": nested,
     }
+    validate_splits(splits, set(frame["id"].astype(int)))
     save_json(DATA_DIR / "splits.json", splits)
     print(
         f"Split {len(frame)} valid samples: "
