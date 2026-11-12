@@ -32,6 +32,7 @@ BATCH_SIZE = 250
 COOLDOWN_S = 60
 PILOT_N = 50
 MAX_PROJECTED_HOURS = 8
+CHECKPOINT_SIZE = 25
 
 
 def _mac_value(command: list[str]) -> str:
@@ -82,7 +83,9 @@ def _append_rows(rows: list[dict], pool_path: Path) -> None:
         existing = pd.read_parquet(pool_path)
         incoming = pd.concat([existing, incoming], ignore_index=True)
         incoming = incoming.drop_duplicates(subset=["id"], keep="last")
-    incoming.to_parquet(pool_path, index=False)
+    temporary_path = pool_path.with_suffix(pool_path.suffix + ".tmp")
+    incoming.to_parquet(temporary_path, index=False)
+    temporary_path.replace(pool_path)
 
 
 def _sample_pool(sketches: list, layouts: list[dict], count: int, rng: np.random.Generator) -> list:
@@ -139,14 +142,24 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=N_TARGET)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--pilot-only", action="store_true")
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     n_target = 30 if args.smoke else args.n
     repeats = 2 if args.smoke else 5
     cooldown = 0 if args.smoke else COOLDOWN_S
+    if args.pilot_only and args.smoke:
+        parser.error("--pilot-only cannot be combined with --smoke")
     if n_target < 1:
         parser.error("--n must be positive")
 
-    output_dir = DATA_DIR / "smoke" if args.smoke else DATA_DIR
+    output_dir = (
+        args.output_dir
+        if args.output_dir is not None
+        else DATA_DIR / "smoke"
+        if args.smoke
+        else DATA_DIR
+    )
     meta_path = output_dir / "run_meta.json"
     reduced_for_projection = False
     if not args.smoke and args.n == N_TARGET and meta_path.exists():
@@ -214,14 +227,27 @@ def main() -> None:
 
     pilot_count = min(PILOT_N, len(remaining))
     pending_rows = []
+    pilot_sample_ids = []
     pilot_ms = []
     pilot_build = []
     for sample_id, (sketch_id, position) in remaining[:pilot_count]:
         result, build_s = measure(position, sketches[sketch_id], layouts[sketch_id], config)
         pending_rows.append(_record(sample_id, sketch_id, position, result, build_s, -1))
+        pilot_sample_ids.append(sample_id)
+        if len(pending_rows) >= 10:
+            _append_rows(pending_rows, pool_path)
+            measured_ids.update(int(row["id"]) for row in pending_rows)
+            pending_rows.clear()
         if result.repeats_ms:
             pilot_ms.append(result.median_ms)
         pilot_build.append(build_s)
+    if pending_rows:
+        _append_rows(pending_rows, pool_path)
+        measured_ids.update(int(row["id"]) for row in pending_rows)
+        pending_rows.clear()
+    pilot_frame = pd.read_parquet(pool_path)
+    pilot_frame = pilot_frame[pilot_frame["id"].isin(pilot_sample_ids)]
+    pilot_statuses = Counter(pilot_frame["status"])
     pilot_median = float(np.median(pilot_ms)) if pilot_ms else 1.0
     slow_threshold_ms = max(pilot_median * 20.0, 0.001)
     config = HarnessConfig(
@@ -240,6 +266,13 @@ def main() -> None:
         + max(0, batch_count - 1) * cooldown
     )
     print(f"Pilot median: {pilot_median:.6f} ms; slow threshold: {slow_threshold_ms:.6f} ms")
+    print(
+        "Pilot status counts:",
+        {
+            name: int(pilot_statuses.get(name, 0))
+            for name in ("ok", "build_fail", "wrong_result", "slow_skip")
+        },
+    )
     print(f"Projected run time: {projected_seconds / 3600:.2f} hours")
     if not args.smoke and projected_seconds > MAX_PROJECTED_HOURS * 3600 and args.n == N_TARGET:
         n_target = 3000
@@ -253,14 +286,16 @@ def main() -> None:
         print("Projection exceeds 8 hours; reducing N_TARGET to 3000")
         print(f"Reduced-pool projection: {projected_seconds / 3600:.2f} hours")
 
-    pilot_rows = {int(row["id"]): row for row in pending_rows}
-    pending_rows = []
+    if args.pilot_only:
+        print("Pilot complete; collection was not started.")
+        return
+
     canary_rows = []
     last_active_batch = None
     completed_count = len(set(run_order[:n_target]).intersection(measured_ids))
     run_samples_completed = 0
     for batch_id, start in enumerate(range(0, n_target, BATCH_SIZE)):
-        batch_order = run_order[start : start + BATCH_SIZE]
+        batch_order = run_order[start : min(start + BATCH_SIZE, n_target)]
         batch_indexes = [
             sample_id
             for sample_id in batch_order
@@ -285,17 +320,13 @@ def main() -> None:
         last_active_batch = batch_id
 
         for sample_id in batch_indexes:
-            if sample_id in pilot_rows:
-                row = pilot_rows[sample_id]
-                row["batch_id"] = batch_id
-            else:
-                sketch_id, position = samples[sample_id]
-                result, build_s = measure(
-                    position, sketches[sketch_id], layouts[sketch_id], config
-                )
-                row = _record(sample_id, sketch_id, position, result, build_s, batch_id)
+            sketch_id, position = samples[sample_id]
+            result, build_s = measure(
+                position, sketches[sketch_id], layouts[sketch_id], config
+            )
+            row = _record(sample_id, sketch_id, position, result, build_s, batch_id)
             pending_rows.append(row)
-            if len(pending_rows) >= BATCH_SIZE:
+            if len(pending_rows) >= CHECKPOINT_SIZE:
                 _append_rows(pending_rows, pool_path)
                 pending_rows.clear()
             completed_count += 1
@@ -341,6 +372,7 @@ def main() -> None:
             "batch_size": BATCH_SIZE,
             "cooldown_s": cooldown,
         },
+        "collection_complete": completed_count >= n_target,
         "target_reduced_for_projection": reduced_for_projection,
         "slow_threshold_ms": slow_threshold_ms,
         "slow_skip_fraction": float((pool["status"] == "slow_skip").mean()),
