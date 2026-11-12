@@ -7,6 +7,7 @@ __pycache__/
 
 logs/
 data/*.parquet
+data/*.parquet.tmp
 data/layout_*.json
 data/run_meta.json
 data/canary.json
