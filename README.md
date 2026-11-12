@@ -25,11 +25,11 @@ The default target is `llvm -mcpu=apple-m2 -num-cores=4`. `make` sets
 ## Commands
 
 ```sh
-make smoke  # pytest, 10 harness measurements, and a 30-schedule smoke dataset
+make smoke  # pytest, 10 harness measurements, and an isolated 30-schedule smoke dataset
 python scripts/01_collect.py --pilot-only  # real-settings pilot and 5,000-sample projection
 make data   # collect 5,000 schedules (or 3,000 if the pilot projects >8 hours)
-make models # split, fit analytic constants on TRAIN, tune and train XGBoost
-make eval   # test-only metrics and PDF plots
+make models # fit analytic constants on TRAIN, tune and train XGBoost from existing data
+make eval   # models and test-only metrics/PDFs; does not collect or resplit data
 make all    # smoke, full collection, models, and evaluation
 ```
 
@@ -37,8 +37,9 @@ On macOS, `make data` wraps collection with `caffeinate -i` when available.
 For a reproducible collection run, keep the machine plugged in, turn Low Power
 Mode off, and use the documented four TVM threads. macOS does not support
 pinning the process to specific CPU cores, which remains a source of timing
-variance. The smoke target is intended to finish in under five minutes. Full
-collection is hardware-dependent: the pilot reports a projection, caps the
+variance. The smoke target writes its 30-schedule data under `/tmp/dvcm-study-smoke/`
+and is intended to finish in under five minutes. Full collection is
+hardware-dependent: the pilot reports a projection, caps the
 default pool at 3,000 when that estimate exceeds eight hours, and logs
 throughput and ETA. Model fitting and plotting run after collection and their
 runtime depends on the resulting pool and XGBoost performance.
@@ -60,8 +61,10 @@ Generated datasets are stored in [`data/`](./data/):
 - `submission_bundle.zip`: convenience archive containing the measured pool,
   split and run metadata, and all per-sketch layout descriptions.
 
-The `make smoke` collection is isolated under `data/smoke/`, so its two-repeat
-measurements never mix with the five-repeat full study.
+The `make smoke` collection is isolated from `data/`, so its two-repeat
+measurements never mix with the five-repeat full study. `make models` and
+`make eval` require existing `data/pool.parquet` and `data/splits.json`; they
+never launch the collector.
 
 Rows with `ok` and `slow_skip` status are modelable; a slow-skip row carries its
 single-run measurement and is noisier. Failure statuses remain in the parquet
@@ -76,18 +79,18 @@ generated measurements are intentionally excluded from Git. The public
 contains the local run used for the reported results; download the
 [dataset bundle](https://github.com/Soutehkeshan/draft-verify-cpu-cost-models/releases/download/study-data-v1/submission_bundle.zip).
 It includes `pool.parquet`, `splits.json`, `run_meta.json`, and the per-sketch
-layout files. The corresponding study code is pinned at
-[commit `1b130ca`](https://github.com/Soutehkeshan/draft-verify-cpu-cost-models/tree/1b130ca).
+layout files. The code revision used for each generated result is recorded in
+that result's provenance metadata.
 
 `results/evaluation.csv` reports all five scorers pooled and separately for
-each sketch. Its Top-k latency ratio is the mean measured latency among the
-scorer's selected top-k schedules divided by the fastest measured latency in
-that test scope; lower is better and 1.0 is perfect. Thus a Top-1 ratio of 1.45
-means the chosen schedule is 45% slower than the test-set oracle. The table
-also includes Spearman within the fastest 10% of schedules, and recall of the
-true ten fastest schedules within the scorer's top 30. Bootstrap intervals
-resample held-out schedules. The full pooled and per-sketch table is also
-written to CSV so the baseline scorers can be compared side by side.
+each sketch. Its latency ratio is mean selected latency divided by the fastest
+test latency in that scope; lower is better and 1.0 is perfect. In particular,
+the top-1 ratio is the chosen schedule's latency divided by the test-set
+fastest latency. The table also includes Spearman within the fastest 10% and
+the fraction of the true ten fastest schedules found in the predicted top 30.
+Non-random confidence intervals bootstrap held-out schedules. The random row
+is the mean of 1,000 seeded random rankings; its confidence intervals are the
+2.5th and 97.5th percentiles across those draws.
 
 `results/noise_floor.csv` reports repeat-half Spearman overall and within the
 fastest decile, by sketch and pooled. The overall value estimates a high
@@ -98,40 +101,31 @@ base-versus-hybrid runs and per-run bootstrap intervals;
 `feature_comparison_summary.csv` reports across-seed 95% t intervals.
 `learning_curve.csv` contains all five runs per nested training subset and
 `learning_curve_summary.csv` summarizes them with across-seed intervals.
-`shuffled_label_check.csv` records the fixed-seed control that retrains after
-permuting TRAIN labels once. Analytic constants are fitted on TRAIN only, and
-the XGBoost grid is selected on VALIDATION only.
+`shuffled_label_null.csv` summarizes 20 global and 20 within-sketch label
+permutations for each XGBoost feature set. `paired_comparison.csv` reports
+paired test-row bootstrap intervals for base-versus-hybrid XGBoost differences
+and seed-to-seed variation. `draft_verify.csv` reports the number of true
+top-10 and top-1 schedules retained by each draft, along with draft-only,
+verify-only, random-draft, and base-XGBoost-draft controls. Analytic constants
+are fitted on TRAIN only, and the XGBoost grid is selected on VALIDATION only.
 
-## Current held-out results
+Scripts 03-06 refuse to write results from a dirty Git worktree unless
+`--allow-dirty` is passed to the script; the Make targets accept
+`ALLOW_DIRTY=1` to pass that flag. JSON result documents contain a `provenance`
+object with the Git commit, dirty flag, UTC timestamp, TVM version, and Python
+version. CSVs have same-stem `.meta.json` companions. XGBoost model JSON files
+embed the provenance in their learner attributes and also have same-stem
+companions. PDF metadata records the same provenance. Run `make eval` from a
+committed, clean checkout to make every regenerated artifact traceable to that
+revision.
 
-The test split contains 752 schedules; 76 are in its fastest decile. Ratios
-below are chosen latency divided by the best measured latency (lower is better).
-Top-1 intervals are bootstrap 95% CIs over test schedules.
+## Results
 
-| Scorer | Spearman | Fastest-decile Spearman | True top-10 recall in top 30 | Top-1 ratio (95% CI) |
-|---|---:|---:|---:|---:|
-| Random | 0.032 | 0.166 | 0.20 | 2.148 (1.986-14.096) |
-| Analytic (hand-set) | 0.457 | -0.044 | 0.00 | 1.750 (1.306-8.718) |
-| Analytic (fitted) | 0.484 | -0.050 | 0.00 | 1.750 (1.306-8.718) |
-| XGBoost (base) | 0.894 | 0.071 | 0.40 | 1.616 (1.073-1.616) |
-| XGBoost (base + analytic) | 0.903 | 0.235 | 0.70 | 1.449 (1.221-1.616) |
-
-Per-sketch results for XGBoost (base + analytic) are:
-
-| Sketch | Test schedules | Spearman | Fastest-decile Spearman | Top-10 recall in top 30 | Top-1 ratio |
-|---:|---:|---:|---:|---:|---:|
-| 0 | 240 | 0.884 | -0.097 | 0.70 | 1.335 |
-| 1 | 246 | 0.907 | 0.410 | 0.80 | 1.231 |
-| 2 | 266 | 0.911 | 0.769 | 1.00 | 1.284 |
-
-Repeat-half Spearman is 0.986 pooled, while it is 0.730 within the fastest
-decile (75 repeatable schedules); the top-decile timing ranks are less stable
-than the full-pool ranks. Across five stochastic model seeds, adding analytic
-features improved mean Spearman by 0.013 (95% t CI 0.008-0.018), a modest
-difference below 0.02. The paired Top-1 ratio difference was -0.126 (95% t CI
--0.359 to 0.107), which does not establish a Top-1 improvement. A model trained
-once on shuffled TRAIN labels had test Spearman 0.094 and fastest-decile
-Spearman -0.003, consistent with no meaningful ranking signal.
+The committed run's `results/evaluation.csv`, `results/paired_comparison.csv`,
+and `results/shuffled_label_null.csv` are the authoritative results tables.
+Each generated file's provenance identifies the code revision used to produce
+it. The downloadable dataset is the fixed measured pool; model outputs can be
+regenerated with `make eval` without recollecting or resplitting that pool.
 
 ## Method and references
 

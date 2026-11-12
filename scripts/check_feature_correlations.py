@@ -2,6 +2,7 @@
 """Report derived-feature Spearman correlations on TRAIN only."""
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.features import ALL_DERIVED_NAMES, DERIVED_NAMES, derived
+from dvcm.provenance import capture_provenance, write_csv
 from dvcm.study import DATA_DIR, RESULTS_DIR, load_layouts, load_pool, load_splits
 
 EXPECTED_SIGNS = {
@@ -25,6 +27,11 @@ FLAT_RHO_THRESHOLD = 0.02
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-dirty", action="store_true")
+    args = parser.parse_args()
+    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+
     metadata_path = DATA_DIR / "run_meta.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Collection metadata not found: {metadata_path}")
@@ -86,7 +93,7 @@ def main() -> None:
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = RESULTS_DIR / "feature_correlations.csv"
-    pd.DataFrame(results).to_csv(output_path, index=False)
+    write_csv(pd.DataFrame(results), output_path, provenance)
     print(f"TRAIN-only Spearman correlations ({len(train)} rows):")
     for result in results:
         print(

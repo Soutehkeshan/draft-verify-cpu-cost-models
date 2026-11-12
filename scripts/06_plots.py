@@ -3,6 +3,7 @@
 """Generate publication-ready PDF summaries without seaborn."""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -21,10 +22,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from dvcm.analytic import AnalyticConstants, latency_seconds
 from dvcm.features import features
 from dvcm.metrics import spearman
+from dvcm.provenance import capture_provenance, pdf_metadata
 from dvcm.study import RESULTS_DIR, load_layouts, load_pool, load_splits
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-dirty", action="store_true")
+    args = parser.parse_args()
+    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+
     plots = RESULTS_DIR / "plots"
     plots.mkdir(parents=True, exist_ok=True)
     evaluation = pd.read_csv(RESULTS_DIR / "evaluation.csv")
@@ -80,12 +87,18 @@ def main() -> None:
     axes[0, 1].set_title("Learning curve")
     axes[0, 1].grid(True, alpha=0.25)
 
-    axes[1, 0].plot(draft["K"], draft["best_1"], marker="o", label="Best-1")
-    axes[1, 0].plot(draft["K"], draft["top_1_latency_ratio"], marker="x", label="Top-1")
+    for method, group in draft.groupby("draft_method", sort=True):
+        group = group.sort_values("K")
+        axes[1, 0].plot(
+            group["K"],
+            group["top_1_latency_ratio"],
+            marker="o",
+            label=method,
+        )
     axes[1, 0].set_xlabel("Draft size K")
     axes[1, 0].set_ylabel("Latency ratio (lower is better)")
     axes[1, 0].set_title("Draft then verify")
-    axes[1, 0].legend()
+    axes[1, 0].legend(fontsize="small")
     axes[1, 0].grid(True, alpha=0.25)
 
     canary_path = RESULTS_DIR / "canary.csv"
@@ -101,7 +114,7 @@ def main() -> None:
         axes[1, 1].set_axis_off()
 
     figure.tight_layout()
-    figure.savefig(plots / "overview.pdf")
+    figure.savefig(plots / "overview.pdf", metadata=pdf_metadata(provenance))
     plt.close(figure)
 
     with (RESULTS_DIR / "constants.json").open(encoding="utf-8") as source:
@@ -139,7 +152,10 @@ def main() -> None:
     axis.set_ylabel("Predicted latency (ms)")
     axis.set_title(f"Measured vs predicted (Spearman {spearman(measured, predicted):.3f})")
     scatter.tight_layout()
-    scatter.savefig(plots / "measured_vs_predicted.pdf")
+    scatter.savefig(
+        plots / "measured_vs_predicted.pdf",
+        metadata=pdf_metadata(provenance),
+    )
     plt.close(scatter)
     print(f"Plots written to {plots}")
 
