@@ -1,6 +1,7 @@
 """Feature construction for encoded MetaSchedule positions."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -11,20 +12,25 @@ POSITION_NAMES = (
     "k0", "k1", "unroll",
 )
 DERIVED_NAMES = (
-    "i_tile_elements",
-    "j_tile_elements",
-    "k_tile_elements",
+    "tile_level_2_bytes",
+    "tile_level_3_bytes",
+    "bytes_moved",
+    "vector_lane_utilisation",
+    "parallel_utilisation",
+)
+ALL_DERIVED_NAMES = (
     "tile_level_0_bytes",
     "tile_level_1_bytes",
     "tile_level_2_bytes",
     "tile_level_3_bytes",
-    "tile_footprint_bytes",
     "bytes_moved",
     "flop_count",
     "vector_lane_utilisation",
     "parallel_utilisation",
-    "unroll_value",
+    "register_utilisation",
 )
+_LEVEL_COUNTS = (4, 4, 2)
+_BYTES_PER_ELEMENT = 4
 
 
 def _tile_slice(tile: dict[str, Any]) -> slice:
@@ -48,85 +54,98 @@ def feature_names(
 
 
 def derived(position: np.ndarray, layout: dict[str, Any]) -> dict[str, float]:
-    """Compute transparent tile and hardware-utilisation descriptors."""
+    """Compute tile working sets, DRAM-boundary traffic, work, and utilization."""
     position = np.asarray(position, dtype=float)
     tiles = layout["tiles"]
-    if len(tiles) != 3:
+    if len(tiles) != len(_LEVEL_COUNTS):
         raise ValueError(f"Expected i, j, and k tile groups; got {len(tiles)}")
     if position.shape != (int(layout["dim"]),):
         raise ValueError(f"Expected position shape {(int(layout['dim']),)}, got {position.shape}")
     if not np.all(np.isfinite(position)):
         raise ValueError("position must contain only finite values")
 
-    factors_by_group = []
-    for tile in tiles:
-        tile_slice = _tile_slice(tile)
-        raw_exponents = position[tile_slice]
+    factors_by_group: list[tuple[int, ...]] = []
+    for tile, level_count in zip(tiles, _LEVEL_COUNTS):
+        if int(tile["n"]) != level_count:
+            raise ValueError(
+                f"Expected {level_count} tile levels for this loop group; got {tile['n']}"
+            )
+        raw_exponents = position[_tile_slice(tile)]
         exponents = np.rint(raw_exponents).astype(int)
         if (
-            np.any(exponents < 0)
+            exponents.size != level_count
+            or np.any(exponents < 0)
             or not np.array_equal(exponents, raw_exponents)
             or int(exponents.sum()) != int(tile["total_exp"])
             or exponents[-1] > int(tile["max_inner_exp"])
         ):
             raise ValueError("position contains an invalid tile exponent group")
-        factors_by_group.append(np.exp2(exponents).astype(int))
+        factors_by_group.append(tuple(2**int(exponent) for exponent in exponents))
 
     i_factors, j_factors, k_factors = factors_by_group
-    i_elements, j_elements, k_elements = (
-        int(np.prod(values, dtype=np.int64))
-        for values in factors_by_group
-    )
+    m, n, k = (math.prod(factors) for factors in factors_by_group)
+    # SSRSRS order is i0,j0,i1,j1,k0,i2,j2,k1,i3,j3.
     level_footprints = []
-    for level in range(4):
-        i_level = int(i_factors[level])
-        j_level = int(j_factors[level])
-        k_level = int(k_factors[level]) if level < len(k_factors) else 1
+    for level in range(_LEVEL_COUNTS[0]):
+        i_extent = int(np.prod(i_factors[level:], dtype=np.int64))
+        j_extent = int(np.prod(j_factors[level:], dtype=np.int64))
+        k_level = max(0, level - 1)
+        k_extent = int(np.prod(k_factors[k_level:], dtype=np.int64))
         level_footprints.append(
-            float(4 * (i_level * k_level + k_level * j_level + i_level * j_level))
+            float(
+                _BYTES_PER_ELEMENT
+                * (i_extent * k_extent + k_extent * j_extent + i_extent * j_extent)
+            )
         )
-    footprint_bytes = float(sum(level_footprints))
-    candidates = layout["categoricals"][0]["candidates"]
-    raw_candidate_idx = position[_categorical_index(layout["categoricals"][0])]
+
+    categorical = layout["categoricals"][0]
+    raw_candidate_idx = position[_categorical_index(categorical)]
     candidate_idx = int(round(raw_candidate_idx))
+    candidates = categorical["candidates"]
     if candidate_idx != raw_candidate_idx:
         raise ValueError("position contains a non-integer unroll candidate index")
     if not 0 <= candidate_idx < len(candidates):
         raise ValueError("position contains an invalid unroll candidate index")
-    unroll_value = float(candidates[candidate_idx])
-    total_exp = sum(int(tile["total_exp"]) for tile in tiles)
-    vector_lanes = float(layout.get("vector_lanes", 4))
-    inner_factor = int(i_factors[-1])
-    vector_util = min(inner_factor, vector_lanes) / vector_lanes
-    outer_parallel = max(
-        1,
-        (2**int(tiles[0]["total_exp"]) // int(i_factors[0]))
-        * (2**int(tiles[1]["total_exp"]) // int(j_factors[0])),
+    vector_lanes = int(layout.get("vector_lanes", 4))
+    num_cores = int(layout.get("num_cores", 4))
+    vector_registers = int(layout.get("vector_registers", 32))
+    if vector_lanes < 1 or num_cores < 1 or vector_registers < 1:
+        raise ValueError("vector_lanes, num_cores, and vector_registers must be positive")
+    vector_util = min(j_factors[-1], vector_lanes) / vector_lanes
+    parallel_levels = layout["parallel_tile_levels"]
+    i_parallel_levels = int(parallel_levels["i"])
+    j_parallel_levels = int(parallel_levels["j"])
+    if (
+        not 1 <= i_parallel_levels <= len(i_factors)
+        or not 1 <= j_parallel_levels <= len(j_factors)
+    ):
+        raise ValueError("parallel_tile_levels must select valid i and j levels")
+    parallel_tasks = math.prod(i_factors[:i_parallel_levels]) * math.prod(
+        j_factors[:j_parallel_levels]
     )
-    parallel_util = min(outer_parallel, int(layout.get("num_cores", 4))) / float(
-        layout.get("num_cores", 4)
+    parallel_util = parallel_tasks / (
+        math.ceil(parallel_tasks / num_cores) * num_cores
     )
-    n = 2**int(tiles[0]["total_exp"])
-    bytes_moved = 4.0 * (
-        (n**3 / int(j_factors[-1]))
-        + (n**3 / int(i_factors[-1]))
-        + n**2
+    register_util = min(
+        1.0,
+        vector_registers * vector_lanes / (i_factors[-1] * j_factors[-1]),
     )
-    return {
-        "i_tile_elements": float(i_elements),
-        "j_tile_elements": float(j_elements),
-        "k_tile_elements": float(k_elements),
+    level_1_regions = i_factors[0] * j_factors[0]
+    bytes_moved = float(level_1_regions * level_footprints[1])
+    values = {
         **{
             f"tile_level_{level}_bytes": value
             for level, value in enumerate(level_footprints)
         },
-        "tile_footprint_bytes": footprint_bytes,
         "bytes_moved": bytes_moved,
-        "flop_count": float(2 * 2**total_exp),
+        "flop_count": float(2 * m * n * k),
         "vector_lane_utilisation": float(vector_util),
         "parallel_utilisation": float(parallel_util),
-        "unroll_value": unroll_value,
+        "register_utilisation": float(register_util),
     }
+    if not np.all(np.isfinite(list(values.values()))):
+        raise ValueError("derived features must be finite")
+    return values
 
 
 def features(
@@ -135,13 +154,14 @@ def features(
     layout: dict[str, Any],
     include_derived: bool = True,
 ) -> np.ndarray:
-    """Return encoded exponents, sketch identifier, and optional derived features."""
+    """Return encoded exponents, sketch identifier, and optional model features."""
     position = np.asarray(position, dtype=float)
     if position.shape != (len(POSITION_NAMES),):
         raise ValueError(f"Expected {len(POSITION_NAMES)} encoded values, got {position.shape}")
     values = np.append(position, float(sketch_id))
     if include_derived:
-        values = np.append(values, list(derived(position, layout).values()))
+        descriptors = derived(position, layout)
+        values = np.append(values, [descriptors[name] for name in DERIVED_NAMES])
     if not np.all(np.isfinite(values)):
         raise ValueError("features must be finite")
     return values.astype(float)

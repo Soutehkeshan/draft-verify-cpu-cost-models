@@ -30,10 +30,21 @@ def main() -> None:
     evaluation = pd.read_csv(RESULTS_DIR / "evaluation.csv")
     learning = pd.read_csv(RESULTS_DIR / "learning_curve.csv")
     draft = pd.read_csv(RESULTS_DIR / "draft_verify.csv")
+    evaluation = evaluation[evaluation["scope"] == "pooled"]
+    learning = learning[learning["scope"] == "pooled"]
+    draft = draft[draft["scope"] == "pooled"]
     figure, axes = plt.subplots(2, 2, figsize=(12, 9))
 
     axes[0, 0].axis("off")
-    table_data = evaluation[["scorer", "spearman", "top_1_latency_ratio", "best_5"]]
+    table_data = evaluation[
+        [
+            "scorer",
+            "spearman",
+            "fastest_decile_spearman",
+            "top_10_recall_in_30",
+            "top_1_latency_ratio",
+        ]
+    ]
     axes[0, 0].table(
         cellText=np.round(table_data.iloc[:, 1:].to_numpy(dtype=float), 3),
         rowLabels=table_data["scorer"].tolist(),

@@ -69,8 +69,13 @@ def _json_layout(layout: dict, sketch_id: int) -> dict:
             for category in layout["categoricals"]
         ],
         "dim": int(layout["dim"]),
+        "parallel_tile_levels": {
+            "i": int(layout["parallel_tile_levels"]["i"]),
+            "j": int(layout["parallel_tile_levels"]["j"]),
+        },
         "vector_lanes": 4,
         "num_cores": 4,
+        "vector_registers": 32,
     }
 
 

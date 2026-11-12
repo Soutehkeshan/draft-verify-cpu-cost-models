@@ -27,6 +27,8 @@ def train_xgb(
         n_estimators=n_estimators,
         random_state=seed,
         n_jobs=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
         tree_method="hist",
     )
     model.fit(x_train, np.log(np.maximum(y_train_ms, 1e-12)))

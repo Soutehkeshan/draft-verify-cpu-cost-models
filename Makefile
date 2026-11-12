@@ -22,6 +22,7 @@ data:
 	$(PYTHON) scripts/02_split.py
 
 models: data
+	$(PYTHON) scripts/check_feature_correlations.py
 	$(PYTHON) scripts/03_fit_analytic.py
 	$(PYTHON) scripts/04_train.py
 

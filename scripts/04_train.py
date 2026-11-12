@@ -15,7 +15,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from dvcm.analytic import AnalyticConstants, latency_seconds
 from dvcm.features import features
 from dvcm.learned import train_xgb
-from dvcm.study import RESULTS_DIR, load_layouts, load_pool, load_splits, save_json
+from dvcm.study import (
+    RESULTS_DIR,
+    load_layouts,
+    load_pool,
+    load_splits,
+    save_json,
+    validate_splits,
+)
 
 
 def _feature_matrix(frame, layouts, include_derived, constants):
@@ -38,6 +45,7 @@ def _rmse(y_true, prediction):
 def main() -> None:
     frame = load_pool()
     splits = load_splits()
+    validate_splits(splits, set(frame["id"].astype(int)))
     layouts = load_layouts()
     constants_path = RESULTS_DIR / "constants.json"
     if not constants_path.exists():
@@ -109,7 +117,20 @@ def main() -> None:
                 model.save_model(
                     model_dir / f"{feature_set}_n{size_name}_seed{seed}.json"
                 )
-    save_json(RESULTS_DIR / "training_grid.json", {"grid": grid, "best": best_configs})
+    save_json(
+        RESULTS_DIR / "training_grid.json",
+        {
+            "grid": grid,
+            "best": best_configs,
+            "training_settings": {
+                "objective": "reg:squarederror",
+                "eval_metric": "rmse",
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "random_seeds": list(range(5)),
+            },
+        },
+    )
     print(
         f"Trained 5-seed nested models using {len(train_frame)} training "
         f"and {len(validation_frame)} validation samples"
