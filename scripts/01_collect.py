@@ -34,6 +34,7 @@ from dvcm.encoding import (
     structural_layout,
 )
 from dvcm.config import (
+    LEGACY_TARGET,
     TargetConfig,
     WorkloadConfig,
     add_target_argument,
@@ -846,6 +847,12 @@ def main() -> None:
         parser.error(
             "--order, --splits, --ssh-target, --batch-size, --cooldown-s, and "
             "--allow-dirty require --positions-from"
+        )
+    if target_config.target_id != LEGACY_TARGET:
+        # Sampling new positions is the M2 pool's protocol; other targets replay it.
+        parser.error(
+            f"--target {target_config.target_id} collects by replaying an existing pool: "
+            "use --positions-from data/pool.parquet --order test_first --rpc-host ... --ssh-target ..."
         )
     target_config.require_benchmarking_profile()
     target = target_config.make_tvm_target()
