@@ -48,7 +48,7 @@ def main() -> None:
     train_ids = set(int(value) for value in splits["train"])
     train = frame[frame["id"].astype(int).isin(train_ids)]
     layouts = load_layouts(data_dir, target)
-    defaults = AnalyticConstants(**target.analytic_constants())
+    defaults = AnalyticConstants.from_target(target)
     positions = [np.asarray(value, dtype=float) for value in train["vector"]]
     layout_values = [layouts[int(value)] for value in train["sketch_id"]]
     fitted = fit_constants(
@@ -72,6 +72,7 @@ def main() -> None:
         "initial_fitted_constants": {
             name: getattr(defaults, name) for name in fitted_names
         },
+        "initial_fitted_constants_note": "initial guess, fitted on TRAIN only",
         "fitted_constants": list(fitted_names),
         "fit_multipliers": fit_multipliers,
         "hand_set_constants": defaults.to_dict(),

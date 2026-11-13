@@ -38,16 +38,9 @@ def load_layouts(
                     f"Legacy layout {path} lacks parallel-loop metadata"
                 ) from error
         if target is not None:
-            target_fields = {
-                "vector_lanes": target.simd_width_f32,
-                "num_cores": target.num_cores,
-                "vector_registers": target.vector_registers,
-            }
-            for name, value in target_fields.items():
-                if value is None:
-                    layout.pop(name, None)
-                else:
-                    layout[name] = int(value)
+            from dvcm.features import bind_target_settings
+
+            layout = bind_target_settings(layout, target)
         layouts[sketch_id] = layout
     if not layouts:
         raise FileNotFoundError(f"No layout_*.json files found in {data_dir}")

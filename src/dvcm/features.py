@@ -31,6 +31,28 @@ ALL_DERIVED_NAMES = (
 )
 _LEVEL_COUNTS = (4, 4, 2)
 _BYTES_PER_ELEMENT = 4
+# Layout key -> TargetConfig field supplying it.
+TARGET_FEATURE_FIELDS = {
+    "vector_lanes": "simd_width_f32",
+    "num_cores": "num_cores",
+    "vector_registers": "vector_registers",
+}
+
+
+def bind_target_settings(layout: dict[str, Any], target: Any) -> dict[str, Any]:
+    """Return a copy of layout whose hardware values come only from the target profile.
+
+    Values baked into older layout files are dropped when the profile leaves them
+    unset, so derived() then refuses instead of silently reusing another target.
+    """
+    bound = dict(layout)
+    for name, field in TARGET_FEATURE_FIELDS.items():
+        value = getattr(target, field)
+        if value is None:
+            bound.pop(name, None)
+        else:
+            bound[name] = int(value)
+    return bound
 
 
 def _tile_slice(tile: dict[str, Any]) -> slice:
