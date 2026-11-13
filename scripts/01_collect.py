@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
 import hashlib
 import json
@@ -183,11 +183,11 @@ def _sha256(path: Path) -> str:
 
 
 def order_test_first(splits: dict[str, Any], available_ids: set[int]) -> list[int]:
-    """TEST ids (stored order), then the nested TRAIN subsets in their existing order.
+    """TEST ids, then VALIDATION ids (stored order), then TRAIN in nested-subset order.
 
-    Nested subsets are prefixes of one shuffled TRAIN order, so after TEST the run
-    grows the largest complete nested subset. VALIDATION is not part of the
-    requested order and is appended last.
+    Nested TRAIN subsets (100, 250, 500, 1000, 2000, all) are prefixes of one
+    shuffled TRAIN order, so a run stopped after VALIDATION always holds the
+    largest complete nested subset reached so far.
     """
     order: list[int] = []
     seen: set[int] = set()
@@ -200,12 +200,12 @@ def order_test_first(splits: dict[str, Any], available_ids: set[int]) -> list[in
                 order.append(value)
 
     extend(splits["test"])
+    extend(splits["validation"])
     nested = splits["nested_train"]
     for name in sorted((key for key in nested if key != "all"), key=int):
         extend(nested[name])
     extend(nested.get("all", ()))
     extend(splits["train"])
-    extend(splits["validation"])
     unknown = sorted(seen - available_ids)
     if unknown:
         raise ValueError(f"splits reference ids missing from the source pool: {unknown[:5]}")
@@ -257,10 +257,12 @@ class RemoteSession:
         self.port = port
         self.executor = RPCExecutor.connect(host, port)
         self.reconnects = 0
+        self.consecutive_reconnects = 0  # reconnects since the last successful measurement
 
     def reconnect(self) -> None:
         self.executor = RPCExecutor.connect(self.host, self.port)
         self.reconnects += 1
+        self.consecutive_reconnects += 1
 
 
 def measure_with_retry(
@@ -279,10 +281,13 @@ def measure_with_retry(
     """
     for attempt in (1, 2):
         try:
-            return measure(position, sketch, layout, config, session.executor)
+            result = measure(position, sketch, layout, config, session.executor)
         except Exception as error:  # remote failure after a successful build
             log_error(attempt, error)
             session.reconnect()
+            continue
+        session.consecutive_reconnects = 0
+        return result
     return MeasurementResult(
         TimingResult((), float("nan"), float("nan"), "rpc_error"), float("nan")
     )
@@ -373,6 +378,142 @@ def _log_error(path: Path, label: Any, attempt: int, error: BaseException) -> No
     print(f"RPC failure on {label} (attempt {attempt}): {record['error']}", file=sys.stderr)
 
 
+# Auto-pause rules for the positions-driven collection.
+DRIFT_LIMIT_PCT = 5.0  # |canary median drift| vs the qualification baseline ...
+DRIFT_BATCHES = 2  # ... for this many consecutive batches
+NON_OK_LIMIT = 0.05  # fraction of non-ok rows in one batch
+MAX_CONSECUTIVE_RECONNECTS = 2
+FREQUENCY_MARGIN = 0.95  # time at the top clock must cover this share of kernel-busy time
+CPU_CAP_DEVICES = (
+    "cpu-balanced", "cpu-throttle-alert", "DFLL-cap", "CORE-cap",
+    "emergency-balanced", "heavy", "hot-surface-alert", "skin-balanced",
+)
+PLACEHOLDER_SENSORS = ("PMIC-Die",)  # reads a constant 100.0 C on the Nano
+PAUSE_EXIT_CODE = 3
+
+
+class AutoPause(Exception):
+    """Raised inside a batch so the batch is checkpointed before the run pauses."""
+
+
+def canary_baseline(output_dir: Path, canaries: list[dict]) -> tuple[dict[int, float], str]:
+    """Per-canary qualification baseline in ms.
+
+    Uses the noise canary's session-1 median across rounds when
+    qualification/noise.json describes the same canaries, else the pilot median.
+    """
+    noise_path = output_dir / "qualification" / "noise.json"
+    if noise_path.is_file():
+        with noise_path.open(encoding="utf-8") as stream:
+            per_canary = json.load(stream).get("per_canary", [])
+        source_ids = {int(item["canary_id"]): int(item["id"]) for item in per_canary}
+        if len(per_canary) == len(canaries) and all(
+            source_ids.get(index) == int(item.get("id", -1)) for index, item in enumerate(canaries)
+        ):
+            return (
+                {
+                    int(item["canary_id"]): float(np.median(item["round_medians_ms"]))
+                    for item in per_canary
+                },
+                "qualification noise canary, session-1 median of rounds",
+            )
+    return (
+        {
+            index: float(item["pilot_median_ms"])
+            for index, item in enumerate(canaries)
+            if item.get("pilot_median_ms")
+        },
+        "pilot median (canary.json)",
+    )
+
+
+def canary_drift_pct(canary_rows: list[dict], baseline: dict[int, float]) -> float | None:
+    """Median over canaries of (batch median / baseline - 1), in percent."""
+    ratios = [
+        row["median_ms"] / baseline[row["canary_id"]] - 1.0
+        for row in canary_rows
+        if row["status"] == "ok" and baseline.get(row["canary_id"])
+    ]
+    return float(100.0 * np.median(ratios)) if ratios else None
+
+
+def _busy_estimate_s(row: dict, config: HarnessConfig) -> float:
+    """Kernel-busy seconds of one time_module call: correctness run, single shot
+    and its warm-up, evaluator warm-up, then repeats of at least min_repeat_ms."""
+    if not row["repeats_ms"]:
+        return 0.0
+    median = float(row["median_ms"])
+    if row["status"] == "slow_skip":
+        return 3.0 * median / 1000.0
+    return (4.0 * median + config.repeats * max(median, config.min_repeat_ms)) / 1000.0
+
+
+def batch_frequency_check(
+    before: dict | None, after: dict | None, rows: list[dict], config: HarnessConfig
+) -> dict[str, Any]:
+    """Frequency-under-load evidence for one batch from its before/after probes only."""
+    busy = sum(_busy_estimate_s(row, config) for row in rows)
+    reasons: list[str] = []
+    if not before or not after:
+        return {"busy_estimate_s": busy, "drop": True,
+                "reasons": ["device-state probe missing; frequency not verified"]}
+    residency = next(iter(frequency_residency(before, after).values()), {})
+    hw_max = max(
+        (
+            (info.get("hw_max_khz") or 0)
+            for info in after.get("cpus", {}).values()
+            if info.get("online") == "1"
+        ),
+        default=0,
+    )
+    at_max = float(residency.get("seconds_at_max") or 0.0)
+    if not residency:
+        reasons.append("no cpufreq residency in the probes")
+    elif at_max < FREQUENCY_MARGIN * busy:
+        reasons.append(
+            f"{at_max:.1f} s at {hw_max / 1000:.0f} MHz < {FREQUENCY_MARGIN} x "
+            f"{busy:.1f} s kernel-busy estimate"
+        )
+    for state, label in ((before, "before"), (after, "after")):
+        capped = sorted(
+            name for name, info in state.get("cpus", {}).items()
+            if info.get("online") == "1" and (info.get("max_khz") or hw_max) < hw_max
+        )
+        if capped:
+            reasons.append(f"scaling_max_freq below {hw_max} kHz {label}: {capped}")
+        active = {
+            name: info["cur_state"]
+            for name, info in state.get("cooling_devices", {}).items()
+            if name in CPU_CAP_DEVICES and info.get("cur_state")
+        }
+        if active:
+            reasons.append(f"CPU cap/throttle cooling devices active {label}: {active}")
+    return {
+        "mean_mhz": residency["mean_khz"] / 1000.0 if residency.get("mean_khz") else None,
+        "seconds_at_max": at_max,
+        "busy_estimate_s": busy,
+        "window_s": residency.get("total_s"),
+        "hw_max_khz": hw_max,
+        "drop": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+def _temperatures_c(*states: dict | None) -> list[float]:
+    return [
+        value / 1000.0
+        for state in states
+        if state
+        for name, value in state.get("thermal_millic", {}).items()
+        if value is not None and name not in PLACEHOLDER_SENSORS
+    ]
+
+
+def _hms(seconds: float) -> str:
+    seconds = int(max(seconds, 0))
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
 def collect_from_positions(
     args: argparse.Namespace,
     parser: argparse.ArgumentParser,
@@ -390,6 +531,10 @@ def collect_from_positions(
         parser.error("--positions-from requires --ssh-target for device-state records")
     if args.n < 1:
         parser.error("--n must be positive")
+    batch_size = int(getattr(args, "batch_size", None) or BATCH_SIZE)
+    cooldown_s = float(COOLDOWN_S if getattr(args, "cooldown_s", None) is None else args.cooldown_s)
+    if batch_size < 1 or cooldown_s < 0:
+        parser.error("--batch-size must be positive and --cooldown-s non-negative")
     source = Path(args.positions_from).resolve()
     splits_path = Path(args.splits or source.parent / "splits.json").resolve()
     data_dir, _ = target_config.paths(ROOT)
@@ -441,9 +586,11 @@ def collect_from_positions(
     pool_path = output_dir / "pool.parquet"
     canary_log_path = output_dir / "canary_log.parquet"
     error_log_path = output_dir / "collection_errors.jsonl"
+    batch_log_path = output_dir / "collection_batches.jsonl"
     meta_path = output_dir / "run_meta.json"
     existing = pd.read_parquet(pool_path) if pool_path.exists() else pd.DataFrame()
     measured = set(existing["id"].astype(int)) if not existing.empty else set()
+    baseline, baseline_source = canary_baseline(output_dir, canaries)
     config = HarnessConfig(
         target=target,
         postprocessors=target_config.postprocessors,
@@ -458,6 +605,7 @@ def collect_from_positions(
     first_start = (run_meta.get("collection") or {}).get("start_timestamp")
     start_timestamp = first_start or datetime.now(timezone.utc).isoformat()
     session = RemoteSession(args.rpc_host, args.rpc_port)
+    run_state = {"state": "running", "reason": None}
 
     def save_progress() -> None:
         pool = pd.read_parquet(pool_path) if pool_path.exists() else pd.DataFrame()
@@ -472,11 +620,20 @@ def collect_from_positions(
             "splits": str(splits_path),
             "splits_sha256": _sha256(splits_path),
             "order": "test_first",
-            "order_detail": "TEST (stored order), nested TRAIN subsets (existing order), then VALIDATION",
+            "order_detail": "TEST, VALIDATION (stored order), then TRAIN in nested-subset order",
             "n_target": len(order),
-            "batch_size": BATCH_SIZE,
-            "cooldown_s": COOLDOWN_S,
+            "batch_size": batch_size,
+            "cooldown_s": cooldown_s,
             "canaries": len(canaries),
+            "canary_baseline": baseline_source,
+            "auto_pause": {
+                "canary_drift_pct": DRIFT_LIMIT_PCT, "drift_batches": DRIFT_BATCHES,
+                "non_ok_fraction": NON_OK_LIMIT, "consecutive_reconnects": MAX_CONSECUTIVE_RECONNECTS,
+                "frequency_margin": FREQUENCY_MARGIN, "server_environment": "must match rpc_server",
+            },
+            "state": run_state["state"],
+            "pause_reason": run_state["reason"],
+            "git_commit": provenance["git_commit"],
             "slow_threshold_ms": threshold,
             "repeats": config.repeats,
             "number": config.number,
@@ -493,59 +650,157 @@ def collect_from_positions(
         }
         save_json(meta_path, meta)
 
+    def pause(reason: str) -> None:
+        run_state.update(state="paused", reason=reason)
+        save_progress()
+        print(f"AUTO-PAUSE: {reason}. Checkpointed; rerun the same command to resume.", flush=True)
+        raise SystemExit(PAUSE_EXIT_CODE)
+
+    batches = [order[start : start + batch_size] for start in range(0, len(order), batch_size)]
+    print(
+        f"Collecting {len(order)} schedules in {len(batches)} batches of {batch_size} "
+        f"(cooldown {cooldown_s:g} s, {len(canaries)} canaries/batch, baseline: {baseline_source}); "
+        f"{len(set(order) & measured)} already measured; commit {provenance['git_commit'][:12]}",
+        flush=True,
+    )
+    save_progress()
+    run_started = time.monotonic()
+    batches_run = 0
+    drifted_streak = 0
     ran_batch = False
-    for batch_id, start in enumerate(range(0, len(order), BATCH_SIZE)):
-        todo = [i for i in order[start : start + BATCH_SIZE] if i not in measured]
-        if not todo:
-            continue
-        if ran_batch and COOLDOWN_S:
-            time.sleep(COOLDOWN_S)
-        before, errors = _probe(args.ssh_target)
-        if before is None:
-            raise RuntimeError(f"Device-state probe failed before batch {batch_id}: {errors}")
-        _check_server_environment(before, expected_environment)
-        session_at_start = session.reconnects
-        rows: list[dict] = []
-        canary_rows: list[dict] = []
-        try:
-            for canary_id, item in enumerate(canaries):
-                sketch_id = int(item["sketch_id"])
-                position = np.asarray(item["vector"], dtype=int)
-                result = measure_with_retry(
-                    session, position, sketches[sketch_id], layouts[sketch_id], config,
-                    partial(_log_error, error_log_path, f"canary-{canary_id}"),
+    try:
+        for batch_id, batch_ids in enumerate(batches):
+            todo = [i for i in batch_ids if i not in measured]
+            if not todo:
+                continue
+            if ran_batch and cooldown_s:
+                time.sleep(cooldown_s)
+            batch_started = time.monotonic()
+            started_utc = datetime.now(timezone.utc).isoformat()
+            before, errors = _probe(args.ssh_target)
+            if before is None:
+                pause(f"device-state probe failed before batch {batch_id}: {errors}")
+            try:
+                _check_server_environment(before, expected_environment)
+            except RuntimeError as error:
+                pause(str(error))
+            session_at_start = session.reconnects
+            rows: list[dict] = []
+            canary_rows: list[dict] = []
+            pause_reason = None
+            drift = None
+            try:
+                for canary_id, item in enumerate(canaries):
+                    sketch_id = int(item["sketch_id"])
+                    position = np.asarray(item["vector"], dtype=int)
+                    result = measure_with_retry(
+                        session, position, sketches[sketch_id], layouts[sketch_id], config,
+                        partial(_log_error, error_log_path, f"canary-{canary_id}"),
+                    )
+                    canary_rows.append(
+                        {
+                            **_record(-1, sketch_id, position, result, batch_id),
+                            "canary_id": canary_id,
+                            "source_id": int(item.get("id", -1)),
+                        }
+                    )
+                    if session.consecutive_reconnects >= MAX_CONSECUTIVE_RECONNECTS:
+                        raise AutoPause(f"{session.consecutive_reconnects} RPC reconnects in a row")
+                drift = canary_drift_pct(canary_rows, baseline)
+                drifted_streak = drifted_streak + 1 if drift is not None and abs(drift) > DRIFT_LIMIT_PCT else 0
+                if drifted_streak >= DRIFT_BATCHES:
+                    raise AutoPause(
+                        f"canary median drift {drift:+.2f}% beyond {DRIFT_LIMIT_PCT}% for "
+                        f"{drifted_streak} consecutive batches"
+                    )
+                for sample_id in todo:
+                    sketch_id, position = by_id[sample_id]
+                    result = measure_with_retry(
+                        session, position, sketches[sketch_id], layouts[sketch_id], config,
+                        partial(_log_error, error_log_path, sample_id),
+                    )
+                    rows.append(_record(sample_id, sketch_id, position, result, batch_id))
+                    if session.consecutive_reconnects >= MAX_CONSECUTIVE_RECONNECTS:
+                        raise AutoPause(f"{session.consecutive_reconnects} RPC reconnects in a row")
+            except AutoPause as reason:
+                pause_reason = str(reason)
+            finally:
+                after, after_errors = _probe(args.ssh_target)
+                state = _device_state_record(
+                    before, after, errors + after_errors, (session_at_start, session.reconnects)
                 )
-                canary_rows.append(
-                    {
-                        **_record(-1, sketch_id, position, result, batch_id),
-                        "canary_id": canary_id,
-                        "source_id": int(item.get("id", -1)),
-                    }
-                )
-            for sample_id in todo:
-                sketch_id, position = by_id[sample_id]
-                result = measure_with_retry(
-                    session, position, sketches[sketch_id], layouts[sketch_id], config,
-                    partial(_log_error, error_log_path, sample_id),
-                )
-                rows.append(_record(sample_id, sketch_id, position, result, batch_id))
-        finally:
-            after, after_errors = _probe(args.ssh_target)
-            state = _device_state_record(
-                before, after, errors + after_errors, (session_at_start, session.reconnects)
+                for row in rows + canary_rows:
+                    row["target_id"] = target_config.target_id
+                    row["device_state"] = state
+                _append_rows(rows, pool_path)  # checkpoint per batch
+                _append_log(canary_rows, canary_log_path)
+                measured.update(int(row["id"]) for row in rows)
+                save_progress()
+            ran_batch = True
+            batches_run += 1
+            frequency = batch_frequency_check(before, after, rows + canary_rows, config)
+            batch_status = Counter(row["status"] for row in rows)
+            non_ok = sum(count for name, count in batch_status.items() if name != "ok")
+            temperatures = _temperatures_c(before, after)
+            if pause_reason is None:
+                if after is not None:
+                    try:
+                        _check_server_environment(after, expected_environment)
+                    except RuntimeError as error:
+                        pause_reason = str(error)
+                if pause_reason is None and frequency["drop"]:
+                    pause_reason = "frequency drop under load: " + "; ".join(frequency["reasons"])
+                if pause_reason is None and rows and non_ok / len(rows) > NON_OK_LIMIT:
+                    pause_reason = (
+                        f"{non_ok}/{len(rows)} non-ok rows ({dict(batch_status)}) exceed "
+                        f"{NON_OK_LIMIT:.0%}"
+                    )
+            pool_status = Counter(pd.read_parquet(pool_path)["status"]) if pool_path.exists() else Counter()
+            elapsed = time.monotonic() - run_started
+            remaining = sum(1 for ids in batches if any(i not in measured for i in ids))
+            eta_s = elapsed / batches_run * remaining
+            finish = datetime.now().astimezone() + timedelta(seconds=eta_s)
+            record = {
+                "batch_id": batch_id, "started_utc": started_utc,
+                "ended_utc": datetime.now(timezone.utc).isoformat(),
+                "batch_wall_s": time.monotonic() - batch_started,
+                "rows": len(rows), "status_counts": dict(batch_status),
+                "canary_drift_pct": drift, "canary_baseline": baseline_source,
+                "canary_ok": sum(1 for row in canary_rows if row["status"] == "ok"),
+                "frequency": frequency,
+                "temperature_c": {"min": min(temperatures, default=None),
+                                  "max": max(temperatures, default=None)},
+                "rpc_session_index": {"batch_start": session_at_start, "batch_end": session.reconnects},
+                "pause_reason": pause_reason,
+            }
+            with batch_log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, sort_keys=True) + "\n")
+            drift_text = "n/a" if drift is None else f"{drift:+.2f}%"
+            mean_mhz = frequency.get("mean_mhz")
+            print(
+                f"Batch {batch_id + 1}/{len(batches)}: {len(rows)} rows {dict(batch_status)} | "
+                f"total {len(set(order) & measured)}/{len(order)} {dict(pool_status)} | "
+                f"canary drift {drift_text} | CPU mean "
+                f"{'n/a' if mean_mhz is None else f'{mean_mhz:.0f}'} MHz, "
+                f"{frequency.get('seconds_at_max', 0):.0f} s at max vs {frequency['busy_estimate_s']:.0f} s busy | "
+                f"max temp {max(temperatures, default=float('nan')):.1f} C | "
+                f"elapsed {_hms(elapsed)} | projected finish {_hms(eta_s)} "
+                f"(~{finish:%H:%M})",
+                flush=True,
             )
-            for row in rows + canary_rows:
-                row["target_id"] = target_config.target_id
-                row["device_state"] = state
-            _append_rows(rows, pool_path)  # checkpoint per batch
-            _append_log(canary_rows, canary_log_path)
-            measured.update(int(row["id"]) for row in rows)
+            if pause_reason is not None:
+                pause(pause_reason)
+    except BaseException as error:
+        if not isinstance(error, SystemExit):
+            run_state.update(state="stopped", reason=f"{type(error).__name__}: {error}")
             save_progress()
-        ran_batch = True
-        done = len(set(order) & measured)
-        print(f"Batch {batch_id}: {len(rows)} schedules; {done}/{len(order)} measured", flush=True)
+        raise
+    run_state.update(state="complete" if set(order) <= measured else "running", reason=None)
+    save_progress()
     if not ran_batch:
         print(f"Collection already complete: {len(set(order) & measured)}/{len(order)} measured")
+    else:
+        print(f"Collection finished: {len(set(order) & measured)}/{len(order)} measured", flush=True)
 
 
 def main() -> None:
@@ -565,7 +820,11 @@ def main() -> None:
     parser.add_argument(
         "--order",
         choices=("test_first",),
-        help="with --positions-from: TEST ids, then nested TRAIN subsets, then VALIDATION",
+        help="with --positions-from: TEST, then VALIDATION, then TRAIN in nested-subset order",
+    )
+    parser.add_argument("--batch-size", type=int, help=f"with --positions-from (default {BATCH_SIZE})")
+    parser.add_argument(
+        "--cooldown-s", type=float, help=f"with --positions-from: seconds between batches (default {COOLDOWN_S})"
     )
     parser.add_argument("--splits", type=Path, help="splits.json (default: next to --positions-from)")
     parser.add_argument("--ssh-target", help="Nano SSH target for per-batch device-state records")
@@ -580,8 +839,14 @@ def main() -> None:
     if args.positions_from is not None:
         collect_from_positions(args, parser, target_config, workload)
         return
-    if args.order or args.splits or args.ssh_target or args.allow_dirty:
-        parser.error("--order, --splits, --ssh-target, and --allow-dirty require --positions-from")
+    if (
+        args.order or args.splits or args.ssh_target or args.allow_dirty
+        or args.batch_size is not None or args.cooldown_s is not None
+    ):
+        parser.error(
+            "--order, --splits, --ssh-target, --batch-size, --cooldown-s, and "
+            "--allow-dirty require --positions-from"
+        )
     target_config.require_benchmarking_profile()
     target = target_config.make_tvm_target()
     rpc_executor = (

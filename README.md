@@ -344,11 +344,18 @@ correctness, times them with the M2 protocol, and records
 `slow_threshold_ms` (20 x pilot median) in `data/nano/run_meta.json`.
 
 The Nano collection path (written, gated, not yet run) re-measures the M2
-pool's positions in `test_first` order: TEST ids from `data/splits.json`, the
-nested TRAIN subsets in their existing order, then VALIDATION. It checkpoints
-per batch, resumes, retries once after an RPC drop (`rpc_error` otherwise), and
-refuses to run without the pilot threshold, the pilot report, the qualified
-canaries, a clean worktree (or `--allow-dirty`), or an open collection gate:
+pool's positions in `test_first` order: TEST ids from `data/splits.json`, then
+VALIDATION, then TRAIN in nested-subset order (100, 250, 500, 1000, 2000,
+all). It checkpoints per batch (`--batch-size`, default 250; `--cooldown-s`,
+default 60), resumes, retries once after an RPC drop (`rpc_error` otherwise),
+and refuses to run without the pilot threshold, the pilot report, the
+qualified canaries, a clean worktree (or `--allow-dirty`), or an open
+collection gate. It pauses (exit code 3, reason in `run_meta.json`) when the
+canary median drifts more than 5% from the qualification baseline in two
+consecutive batches, when the time at the top CPU clock does not cover the
+batch's kernel-busy time or a CPU cap/throttle device activates, when more
+than 5% of a batch's rows are not `ok`, after two RPC reconnects in a row, or
+when the RPC server environment no longer matches `run_meta.json`:
 
 ```sh
 PYTHONPATH=src python scripts/01_collect.py --target jetson_nano \
