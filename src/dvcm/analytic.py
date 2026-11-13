@@ -12,13 +12,13 @@ from dvcm.features import derived
 
 @dataclass(frozen=True)
 class AnalyticConstants:
-    peak_flops: float = 4.0e11
-    bandwidth_bytes_s: float = 1.0e11
-    l1_bytes: float = 128 * 1024
-    l2_bytes: float = 16 * 1024 * 1024
-    lane_width: int = 4
-    num_cores: int = 4
-    vector_registers: int = 32
+    peak_flops: float
+    bandwidth_bytes_s: float
+    l1_bytes: float
+    l2_bytes: float
+    lane_width: int
+    num_cores: int
+    vector_registers: int
 
     def __post_init__(self) -> None:
         for name in (
@@ -85,7 +85,7 @@ def _penalty_terms_from_descriptors(
 def penalty_terms(
     position: np.ndarray,
     layout: dict[str, Any],
-    constants: AnalyticConstants = AnalyticConstants(),
+    constants: AnalyticConstants,
     penalties: Penalties = Penalties(),
 ) -> dict[str, float]:
     """Return bounded compute and cache factors, with 1.0 meaning no penalty."""
@@ -104,7 +104,7 @@ def penalty_terms(
 def latency_seconds(
     position: np.ndarray,
     layout: dict[str, Any],
-    constants: AnalyticConstants = AnalyticConstants(),
+    constants: AnalyticConstants,
     penalties: Penalties = Penalties(),
 ) -> float:
     """Estimate Pruner-style additive compute and memory time in seconds."""
@@ -135,7 +135,7 @@ def fit_constants(
     positions: list[np.ndarray],
     layouts: list[dict[str, Any]],
     latencies_ms: np.ndarray,
-    initial: AnalyticConstants = AnalyticConstants(),
+    initial: AnalyticConstants,
     penalties: Penalties = Penalties(),
 ) -> AnalyticConstants:
     """Fit peak FLOP/s and DRAM bandwidth against TRAIN log-latency values."""

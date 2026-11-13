@@ -106,9 +106,19 @@ def derived(position: np.ndarray, layout: dict[str, Any]) -> dict[str, float]:
         raise ValueError("position contains a non-integer unroll candidate index")
     if not 0 <= candidate_idx < len(candidates):
         raise ValueError("position contains an invalid unroll candidate index")
-    vector_lanes = int(layout.get("vector_lanes", 4))
-    num_cores = int(layout.get("num_cores", 4))
-    vector_registers = int(layout.get("vector_registers", 32))
+    missing_hardware = [
+        name
+        for name in ("vector_lanes", "num_cores", "vector_registers")
+        if name not in layout or layout[name] is None
+    ]
+    if missing_hardware:
+        raise ValueError(
+            "Target feature settings are required: "
+            + ", ".join(missing_hardware)
+        )
+    vector_lanes = int(layout["vector_lanes"])
+    num_cores = int(layout["num_cores"])
+    vector_registers = int(layout["vector_registers"])
     if vector_lanes < 1 or num_cores < 1 or vector_registers < 1:
         raise ValueError("vector_lanes, num_cores, and vector_registers must be positive")
     vector_util = min(j_factors[-1], vector_lanes) / vector_lanes

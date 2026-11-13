@@ -67,6 +67,39 @@ def top_k_recall(
     return len(actual & predicted) / actual_count
 
 
+def ranking_metrics(
+    y_true: np.ndarray,
+    predicted_latency: np.ndarray,
+) -> dict[str, float]:
+    """Evaluate one latency predictor with the study's shared ranking metrics."""
+    y_true = np.asarray(y_true, dtype=float)
+    predicted_latency = np.asarray(predicted_latency, dtype=float)
+    if (
+        y_true.ndim != 1
+        or predicted_latency.ndim != 1
+        or y_true.shape != predicted_latency.shape
+        or y_true.size == 0
+        or not np.all(np.isfinite(y_true))
+        or not np.all(np.isfinite(predicted_latency))
+        or np.any(y_true <= 0)
+        or np.any(predicted_latency <= 0)
+    ):
+        raise ValueError("latencies must be equal-length, positive finite vectors")
+    ranking = np.argsort(predicted_latency, kind="stable")
+    values = {
+        "spearman": spearman(y_true, predicted_latency),
+        "fastest_decile_spearman": fastest_decile_spearman(
+            y_true, predicted_latency
+        ),
+        "top_10_recall_in_30": top_k_recall(y_true, predicted_latency, 10, 30),
+    }
+    for k in (1, 5, 10):
+        values[f"top_{k}_latency_ratio"] = top_k_latency_ratio(
+            y_true, ranking, min(k, y_true.size)
+        )
+    return values
+
+
 def bootstrap_ci(
     metric: Callable[[np.ndarray, np.ndarray], float],
     y_true: np.ndarray,

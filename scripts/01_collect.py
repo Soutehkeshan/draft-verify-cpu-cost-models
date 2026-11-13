@@ -23,10 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.encoding import describe_space, random_position
+from dvcm.config import (
+    add_target_argument,
+    load_target_config,
+    load_workload_config,
+)
 from dvcm.harness import HarnessConfig, make_matmul, measure
-from dvcm.study import DATA_DIR, RESULTS_DIR, add_schedule_if_new, save_json
+from dvcm.study import add_schedule_if_new, save_json
 
-SEED = 0
 N_TARGET = 5000
 BATCH_SIZE = 250
 COOLDOWN_S = 60
@@ -73,9 +77,6 @@ def _json_layout(layout: dict, sketch_id: int) -> dict:
             "i": int(layout["parallel_tile_levels"]["i"]),
             "j": int(layout["parallel_tile_levels"]["j"]),
         },
-        "vector_lanes": 4,
-        "num_cores": 4,
-        "vector_registers": 32,
     }
 
 
@@ -145,25 +146,33 @@ def _record(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    add_target_argument(parser)
     parser.add_argument("--n", type=int, default=N_TARGET)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--pilot-only", action="store_true")
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
+    target_config = load_target_config(args.target, ROOT)
+    workload = load_workload_config(root=ROOT)
+    target_config.require_benchmarking_profile()
+    target = target_config.make_tvm_target()
     n_target = 30 if args.smoke else args.n
-    repeats = 2 if args.smoke else 5
+    repeats = 2 if args.smoke else workload.measurement["repeats"]
+    number = workload.measurement["number"]
+    min_repeat_ms = workload.measurement["min_repeat_ms"]
     cooldown = 0 if args.smoke else COOLDOWN_S
     if args.pilot_only and args.smoke:
         parser.error("--pilot-only cannot be combined with --smoke")
     if n_target < 1:
         parser.error("--n must be positive")
 
+    data_dir, results_dir = target_config.paths(ROOT)
     output_dir = (
         args.output_dir
         if args.output_dir is not None
-        else DATA_DIR / "smoke"
+        else data_dir / "smoke"
         if args.smoke
-        else DATA_DIR
+        else data_dir
     )
     meta_path = output_dir / "run_meta.json"
     reduced_for_projection = False
@@ -175,24 +184,28 @@ def main() -> None:
             reduced_for_projection = True
             print("Resuming the previously reduced 3,000-schedule target")
     output_dir.mkdir(parents=True, exist_ok=True)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    target = tvm.target.Target(
-        {"kind": "llvm", "mcpu": "apple-m2", "num-cores": 4}
-    )
+    results_dir.mkdir(parents=True, exist_ok=True)
+    num_threads = target_config.thread_settings.get("TVM_NUM_THREADS", 1)
     context = ms.TuneContext(
-        mod=make_matmul(512),
+        mod=make_matmul(workload.n),
         target=target,
-        space_generator=PostOrderApply(sch_rules="llvm", postprocs="llvm"),
-        rand_state=SEED,
-        num_threads=4,
+        space_generator=PostOrderApply(
+            sch_rules=target_config.schedule_rules,
+            postprocs=target_config.postprocessors,
+        ),
+        rand_state=workload.seed,
+        num_threads=num_threads,
     )
+    print(f"Target profile: {target_config.target_id} ({target})")
     sketches = context.generate_design_space()
     layouts = [describe_space(schedule.trace) for schedule in sketches]
     print(f"Design-space sketches: {len(sketches)}")
     for sketch_id, layout in enumerate(layouts):
-        save_json(output_dir / f"layout_{sketch_id}.json", _json_layout(layout, sketch_id))
+        layout_path = output_dir / f"layout_{sketch_id}.json"
+        if not layout_path.exists():
+            save_json(layout_path, _json_layout(layout, sketch_id))
 
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(workload.seed)
     sample_count = n_target if args.smoke else max(N_TARGET, args.n)
     samples = _sample_pool(sketches, layouts, sample_count, rng)
     run_order = rng.permutation(sample_count).tolist()
@@ -228,7 +241,16 @@ def main() -> None:
         return
     start_time = datetime.now(timezone.utc)
     run_started = time.perf_counter()
-    config = HarnessConfig(n=512, target=target, repeats=repeats, seed=SEED, slow_threshold_ms=float("inf"))
+    config = HarnessConfig(
+        target=target,
+        postprocessors=target_config.postprocessors,
+        n=workload.n,
+        repeats=repeats,
+        number=number,
+        min_repeat_ms=min_repeat_ms,
+        seed=workload.seed,
+        slow_threshold_ms=float("inf"),
+    )
 
     pilot_count = min(PILOT_N, len(remaining))
     pending_rows = []
@@ -256,10 +278,13 @@ def main() -> None:
     pilot_median = float(np.median(pilot_ms)) if pilot_ms else 1.0
     slow_threshold_ms = max(pilot_median * 20.0, 0.001)
     config = HarnessConfig(
-        n=512,
         target=target,
+        postprocessors=target_config.postprocessors,
+        n=workload.n,
         repeats=repeats,
-        seed=SEED,
+        number=number,
+        min_repeat_ms=min_repeat_ms,
+        seed=workload.seed,
         slow_threshold_ms=slow_threshold_ms,
     )
     projection_build = float(np.mean(pilot_build[:20])) if pilot_build else 0.0
@@ -347,7 +372,7 @@ def main() -> None:
         canary_log_path = (
             output_dir / "canary_log.csv"
             if args.smoke
-            else RESULTS_DIR / "canary.csv"
+            else results_dir / "canary.csv"
         )
         canary_frame = pd.DataFrame(canary_rows)
         if canary_log_path.exists():
@@ -360,19 +385,26 @@ def main() -> None:
     statuses = Counter(pool["status"])
     ended = datetime.now(timezone.utc)
     meta = {
+        "target_id": target_config.target_id,
+        "target_profile": target_config.to_dict(),
+        "workload": workload.to_dict(),
         "tvm_version": tvm.__version__,
         "target": str(target),
         "machine_model": _mac_value(["sysctl", "-n", "hw.model"]),
-        "macos_version": platform.mac_ver()[0],
+        "macos_version": platform.mac_ver()[0] or None,
+        "host_platform": platform.platform(),
         "python_version": platform.python_version(),
         "power_state": _power_state(),
-        "thread_settings": {"TVM_NUM_THREADS": "4", "target_num_cores": 4},
+        "thread_settings": {
+            "TVM_NUM_THREADS": str(num_threads),
+            "target_num_cores": target_config.num_cores,
+        },
         "config": {
-            "n": 512,
-            "seed": SEED,
+            "n": workload.n,
+            "seed": workload.seed,
             "repeats": repeats,
-            "number": 1,
-            "min_repeat_ms": 10,
+            "number": number,
+            "min_repeat_ms": min_repeat_ms,
             "n_target": n_target,
             "batch_size": BATCH_SIZE,
             "cooldown_s": cooldown,

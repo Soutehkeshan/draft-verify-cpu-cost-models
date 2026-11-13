@@ -1,8 +1,8 @@
 import numpy as np
-import tvm
 from tvm.s_tir import meta_schedule as ms
 from tvm.s_tir.meta_schedule.space_generator import PostOrderApply
 
+from dvcm.config import LEGACY_TARGET, load_target_config, load_workload_config
 from dvcm.encoding import (
     describe_space,
     decisions_to_position,
@@ -17,17 +17,26 @@ from dvcm.study import add_schedule_if_new
 
 
 def _design_spaces():
-    target = tvm.target.Target(
-        {"kind": "llvm", "mcpu": "apple-m2", "num-cores": 4}
-    )
+    target_config = load_target_config(LEGACY_TARGET)
+    workload = load_workload_config()
+    target = target_config.make_tvm_target()
     context = ms.TuneContext(
-        mod=make_matmul(512),
+        mod=make_matmul(workload.n),
         target=target,
-        space_generator=PostOrderApply(sch_rules="llvm", postprocs="llvm"),
-        rand_state=0,
-        num_threads=4,
+        space_generator=PostOrderApply(
+            sch_rules=target_config.schedule_rules,
+            postprocs=target_config.postprocessors,
+        ),
+        rand_state=workload.seed,
+        num_threads=target_config.thread_settings.get("TVM_NUM_THREADS", 1),
     )
     return context.generate_design_space()
+
+
+def _profiled_layout(schedule):
+    layout = describe_space(schedule.trace)
+    layout.update(load_target_config(LEGACY_TARGET).feature_settings())
+    return layout
 
 
 def test_repair_is_idempotent_for_random_positions():
@@ -42,7 +51,7 @@ def test_random_positions_are_valid_and_deduplicate():
     rng = np.random.default_rng(0)
     seen = set()
     for sketch_id, schedule in enumerate(_design_spaces()):
-        layout = describe_space(schedule.trace)
+        layout = _profiled_layout(schedule)
         for _ in range(200):
             position = random_position(rng, layout).astype(int)
             for tile in layout["tiles"]:
@@ -63,7 +72,7 @@ def test_position_trace_round_trip_and_features():
     for _ in range(200):
         sketch_id = int(rng.integers(len(spaces)))
         schedule = spaces[sketch_id]
-        layout = describe_space(schedule.trace)
+        layout = _profiled_layout(schedule)
         position = random_position(rng, layout)
         updated_trace = position_to_decisions(position, schedule, layout)
         round_trip = decisions_to_position(updated_trace, layout)

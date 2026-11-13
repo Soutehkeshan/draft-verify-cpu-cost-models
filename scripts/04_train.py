@@ -14,11 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.analytic import AnalyticConstants, latency_seconds
+from dvcm.config import (
+    add_target_argument,
+    experiment_metadata,
+    load_target_config,
+    load_workload_config,
+)
 from dvcm.features import features
 from dvcm.learned import train_xgb
 from dvcm.provenance import capture_provenance, write_companion, write_json
 from dvcm.study import (
-    RESULTS_DIR,
     load_layouts,
     load_pool,
     load_splits,
@@ -45,15 +50,23 @@ def _rmse(y_true, prediction):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    add_target_argument(parser)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
-    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+    target = load_target_config(args.target, ROOT)
+    workload = load_workload_config(root=ROOT)
+    data_dir, results_dir = target.paths(ROOT)
+    provenance = capture_provenance(
+        ROOT,
+        allow_dirty=args.allow_dirty,
+        run_context=experiment_metadata(target, workload, data_dir),
+    )
 
-    frame = load_pool()
-    splits = load_splits()
+    frame = load_pool(data_dir=data_dir)
+    splits = load_splits(data_dir)
     validate_splits(splits, set(frame["id"].astype(int)))
-    layouts = load_layouts()
-    constants_path = RESULTS_DIR / "constants.json"
+    layouts = load_layouts(data_dir, target)
+    constants_path = results_dir / "constants.json"
     if not constants_path.exists():
         raise FileNotFoundError("Run scripts/03_fit_analytic.py before training")
     import json
@@ -75,7 +88,7 @@ def main() -> None:
             (100, 300),
         )
     )
-    model_dir = RESULTS_DIR / "models"
+    model_dir = results_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     best_configs = {}
     for feature_set, include_derived in (("base", False), ("base_analytic", True)):
@@ -127,13 +140,15 @@ def main() -> None:
                 model.save_model(model_path)
                 write_companion(model_path, provenance)
     write_json(
-        RESULTS_DIR / "training_grid.json",
+        results_dir / "training_grid.json",
         {
             "grid": grid,
             "best": best_configs,
             "training_settings": {
                 "objective": "reg:squarederror",
                 "eval_metric": "rmse",
+                "target_id": target.target_id,
+                "workload_id": workload.workload_id,
                 "subsample": 0.8,
                 "colsample_bytree": 0.8,
                 "random_seeds": list(range(5)),

@@ -14,8 +14,18 @@ data/run_meta.json
 data/canary.json
 data/splits.json
 data/smoke/
+data/*/pool.parquet
+data/*/pool.parquet.tmp
+data/*/layout_*.json
+data/*/run_meta.json
+data/*/canary.json
+data/*/splits.json
 
 results/*.csv
 results/*.json
 results/models/
 results/plots/
+results/*/*.csv
+results/*/*.json
+results/*/models/
+results/*/plots/
