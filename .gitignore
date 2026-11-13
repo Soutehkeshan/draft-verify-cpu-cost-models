@@ -29,3 +29,7 @@ results/*/*.csv
 results/*/*.json
 results/*/models/
 results/*/plots/
+
+# Nano qualification/collection outputs and raw telemetry traces (generated)
+data/nano/
+results/*/telemetry/

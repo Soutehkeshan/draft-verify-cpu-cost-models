@@ -11,9 +11,18 @@
   "vector_registers": null,
   "peak_flops": null,
   "bandwidth_bytes_s": null,
-  "compiler_target": null,
-  "compiler_version": null,
-  "compiler_options": [],
+  "compiler_target": {
+    "kind": "llvm",
+    "mtriple": "aarch64-linux-gnu",
+    "mcpu": "cortex-a57",
+    "num-cores": 4
+  },
+  "compiler_version": "LLVM 22 (M2 TVM build)",
+  "compiler_options": [
+    "-mtriple=aarch64-linux-gnu",
+    "-mcpu=cortex-a57",
+    "-num-cores=4"
+  ],
   "schedule_rules": null,
   "postprocessors": null,
   "thread_settings": {
@@ -31,7 +40,7 @@
     "cuda": "10.2 (not used; this project is CPU-only)"
   },
   "notes": {
-    "status": "Host-side profile only; compiler target, TVM backend, SIMD width, cache sizes, register budget, peak compute, and memory bandwidth require verification or training-only calibration.",
-    "compiler": "The reported GCC version does not establish which compiler or LLVM backend a compatible TVM build would use."
+    "status": "RPC qualification tested LLVM schedule rules and postprocessors on 48 candidates across all three sketches; collection remains gated pending broader validation and timing-stability review.",
+    "compiler": "M2 TVM LLVM emits AArch64 code; Nano-side RPC archive linking invoked /usr/bin/g++."
   }
 }

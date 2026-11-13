@@ -14,13 +14,32 @@ scheduling are out of scope.
 
 ## Current status
 
-**HOST-SIDE REFACTORING COMPLETE — WAITING FOR JETSON NANO INTEGRATION**
+**RPC PROOF OF CONCEPT AND BOUNDED SCHEDULE QUALIFICATION COMPLETE — FULL
+COLLECTION NOT ENABLED**
 
-No Jetson Nano compilation, collection, or measurement has been performed or
-validated. The Nano profile records only the supplied hardware and software
-facts. Its TVM target, schedule rules, postprocessors, SIMD/cache/register
-values, peak compute, and memory bandwidth remain unset; the collection command
-refuses to run until the compiler profile is explicitly completed.
+The M2 successfully cross-compiled and exported AArch64 CPU code for
+`aarch64-linux-gnu` / `cortex-a57`, then loaded and executed it on the Nano
+through TVM RPC. The vector result matched NumPy. One 512x512 FP32 matmul
+candidate from the existing MetaSchedule path also matched NumPy and returned
+a remote `time_evaluator` result. These are integration checks, not a full
+schedule collection or model evaluation.
+
+The host-side qualification explicitly used TVM's `llvm` schedule rules and
+postprocessors for the Cortex-A57 target. It compiled, linked, executed, and
+checked 48 deterministic candidates across all three generated sketches (16
+per sketch); all 48 passed the harness's NumPy correctness check. Three
+separate seven-repeat timing batches were also run for each sketch's recorded
+default schedule. Batch medians were consistent, but two of the three sketches
+had isolated repeats more than 10% above their combined median. No CPU
+frequency or temperature trace was captured, so the cause and collection-grade
+timing stability are not established.
+
+This is a small validation sample, not proof that all 3,704,400 encoded
+positions are valid or reliable. The Nano profile's schedule rules and
+postprocessors therefore remain unset, and the collection command continues
+to refuse to run pending broader review and timing-stability validation.
+SIMD/cache/register model values, peak compute, and memory bandwidth remain
+unset.
 
 The prior Apple M2 data release and its results are retained as historical,
 M2-only material. They are not Jetson measurements and are not presented as
@@ -33,7 +52,7 @@ from the model implementations.
 
 | Profile | Known configuration | Status |
 |---|---|---|
-| `jetson_nano` | NVIDIA Jetson Nano 4GB Developer Kit; ARM Cortex-A57; four CPU cores; reported Ubuntu 18.04.5, aarch64, L4T R32.5.0 / JetPack 4.5, GCC 7.5.0, Python 3.6.9. CUDA 10.2 is recorded as installed but is not used. | Primary target; host-side profile only. Hardware-specific compiler and model assumptions are deliberately unset. |
+| `jetson_nano` | NVIDIA Jetson Nano 4GB Developer Kit; ARM Cortex-A57; four CPU cores; reported Ubuntu 18.04.5, aarch64, L4T R32.5.0 / JetPack 4.5, GCC 7.5.0, Python 3.6.9. CUDA 10.2 is recorded as installed but is not used. | Primary target; compiler target verified by the RPC proof of concept. Schedule rules and model assumptions remain unset. |
 | `apple_m2` | MacBook Air Apple M2, arm64, four cores; existing TVM LLVM target and M2 study assumptions. | Compatibility profile for the previously collected M2 dataset and local smoke tests. |
 
 The M2 profile's 400 GFLOP/s and 100 GB/s values are legacy analytical-fit
@@ -43,12 +62,10 @@ compute and bandwidth must be calibrated from TRAIN measurements (or supplied
 with a documented source); unknown Nano values are never filled with M2
 defaults.
 
-The reported GCC version does not identify the LLVM backend or TVM compiler
-target. In particular, this repository does not establish a TVM/LLVM build
-compatible with the Nano's Python 3.6.9 environment. The current pinned host
-dependencies and Python syntax require Python 3.10 or newer; Nano
-compatibility must be resolved before deployment. Do not upgrade or change the
-Nano's system software as part of this host-side work.
+The host uses its existing TVM 0.27.0.post1 installation and LLVM 22 for
+cross-compilation. The Nano-side RPC server runs from its isolated Python 3.10
+TVM wheel environment; the system Python and NVIDIA stack are not part of this
+workflow.
 
 ## Cost models
 
@@ -104,6 +121,8 @@ another target.
 - `src/dvcm/study.py`: dataset loading, split validation, and deterministic
   split generation.
 - `scripts/`: collection, splitting, fitting, training, evaluation, and plots.
+- `scripts/validate_nano_schedules.py`: bounded RPC schedule qualification;
+  prints validation metadata and results without writing a dataset.
 - `tests/`: synthetic unit tests plus host TVM schedule/build smoke tests.
 
 The harness takes a target and postprocessor configuration rather than
@@ -207,9 +226,87 @@ Commit first, or explicitly use `ALLOW_DIRTY=1`; dirty-run provenance is
 recorded when that override is used.
 
 The default `TARGET` is `jetson_nano`, because it is the primary research
-target. Nano collection currently stops with an explicit unconfigured-target
-error before creating target data or result directories. Do not interpret that
-profile or failure as Nano benchmark support.
+target. Nano collection still stops with an explicit unconfigured-profile
+error before creating target data or result directories. To rerun the two
+integration checks through an SSH tunnel, use
+`python scripts/rpc_poc.py --host 127.0.0.1 --port 9090`. This runs one vector
+function and one MetaSchedule matmul candidate; it does not collect schedules.
+To repeat the bounded schedule qualification and print its per-candidate
+results as JSON without writing a dataset, use:
+
+```sh
+TVM_NUM_THREADS=4 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 PYTHONPATH=src \
+  python scripts/validate_nano_schedules.py --host 127.0.0.1 --port 9090
+```
+
+TVM's CPU pool is configured by the **Nano RPC server process**, not by the M2
+client. In TVM 0.27, `TVM_NUM_THREADS` takes precedence over
+`OMP_NUM_THREADS`; `runtime.NumThreads()` reports the effective pool size.
+`TVM_BIND_THREADS=1` enables the runtime's worker affinity behavior,
+`TVM_EXCLUDE_WORKER0=1` explicitly uses the calling thread as worker zero, and
+`TVM_THREAD_POOL_SPIN_COUNT=0` avoids long idle spinning. These are per-process
+environment settings and do not change Nano system settings.
+
+Use an isolated test port, leaving the normal port 9090 server untouched.
+Change only `TVM_NUM_THREADS` and `OMP_NUM_THREADS` to `1` for the
+single-thread run, restart the temporary server, then repeat with both set to
+`4`; keep the other three settings unchanged:
+
+```sh
+env CC=/usr/bin/gcc CXX=/usr/bin/g++ \
+  TVM_NUM_THREADS=4 OMP_NUM_THREADS=4 TVM_BIND_THREADS=1 \
+  TVM_EXCLUDE_WORKER0=1 TVM_THREAD_POOL_SPIN_COUNT=0 \
+  "$HOME/.local/envs/tvm-rpc/bin/python" \
+  -m tvm.exec.rpc_server --host 127.0.0.1 --port 9091
+```
+
+On the M2, forward that Nano port to local port 19091:
+
+```sh
+ssh -N -L 19091:127.0.0.1:9091 <nano-ssh-host>
+```
+
+For each configuration, run the bounded parallel-vector test:
+
+```sh
+PYTHONPATH=src python scripts/validate_nano_threading.py \
+  --ssh-target arad@jetson-nano.local --host 127.0.0.1 --port 19091 \
+  --device-rpc-port 9091 --expected-threads 4
+```
+
+The test verifies the environment on the Nano session process, checks
+`runtime.NumThreads()`, compiles a TIR-parallel `y = 2*x + 1` function for the
+Nano target, and checks its NumPy result. It reports an uninstrumented timing
+separately from a dedicated instrumented worker-attribution pass. Four-thread
+success requires evidence of three active TVM pool workers and activity on all
+four CPU IDs; thread counts alone are not treated as worker-activity evidence.
+No schedules or dataset rows are collected.
+
+Measure the two sampler modes while the server is idle (not during the clean
+timings):
+
+```sh
+PYTHONPATH=src python scripts/measure_nano_sampler_overhead.py \
+  --ssh-target arad@jetson-nano.local --rpc-host 127.0.0.1 \
+  --rpc-port 19091 --device-rpc-port 9091
+```
+
+It reports sampler process CPU time and per-sample cost for thread-only polling
+and for the full sampler, which additionally reads system utilization and
+hardware sensors. The latter is not assumed to be non-intrusive.
+
+The older three-schedule timing sampler can still be run with
+`scripts/measure_nano_telemetry.py`, but do not use it for a performance
+comparison until the independent overhead result has been reviewed. The
+sampler follows the TVM RPC process tree to the per-connection session child;
+if multiple clients share the selected server, pass `--rpc-pid` for that
+session process. `--device-rpc-port` identifies the Nano-side server port when
+the local tunnel uses a different port.
+
+The temporary server uses `/usr/bin/g++` for TVM's target-side archive linking
+and listens only on localhost. Keep the SSH tunnel open while running tests.
+The RPC server permits remote code execution and file writes; do not expose it
+on an untrusted network.
 
 ## What is tested and what remains
 
@@ -220,43 +317,54 @@ ranking metrics; TVM M2 schedule generation, schedule postprocessing, compile,
 correctness, and smoke timing. No synthetic measurements are used as
 experimental results.
 
+**Tested over Nano RPC:** AArch64 vector compilation/export/link/load/CPU
+execution; 48 candidates across all three 512x512 matmul sketches generated
+with TVM MetaSchedule `llvm` rules and postprocessors; NumPy correctness for
+all sampled schedules. Three seven-repeat timing batches were run for one
+representative schedule per sketch. Batch medians were consistent, with
+isolated high repeats on two sketches. macOS archive export must suppress
+AppleDouble metadata (`COPYFILE_DISABLE=1`) so the Nano linker receives only
+the object files. The optional collector keeps schedule build, archive export,
+module upload, remote link/load, and kernel timing distinct; initial input
+generation and transfer are recorded once in run metadata.
+
 **Existing M2 evidence:** the released M2 dataset and historical M2 result
 artifacts. These are not re-labeled or reinterpreted as Nano measurements.
 
-**Awaiting Nano integration:** compatible TVM and compiler availability,
-validated CPU target and schedule rules, verified postprocessors, cache/SIMD/
-register assumptions, training-calibrated compute/bandwidth constants, and
-actual Nano collection, training, and test evaluation. No Nano performance
-results are reported.
+**Awaiting further Nano validation:** exhaustive or broader schedule-space
+reliability, frequency/temperature monitoring and timing-noise investigation,
+cache/SIMD/register assumptions, training-calibrated compute/bandwidth
+constants, and actual Nano collection, training, and test evaluation. No Nano
+dataset or model-evaluation results are reported; the qualification timings
+are diagnostic only.
 
 ## Handoff: Nano-specific work
 
-Stop here until the hardware owner reviews and approves Nano integration. The
-remaining work is:
+The RPC path is a proof of concept only. The remaining work is:
 
-1. On the Nano, verify its OS, architecture, GCC/Python versions, and the
-   already-installed TVM/LLVM compiler versions without installing or upgrading
-   anything.
-2. Confirm that the existing TVM build can target and execute CPU code on the
-   Cortex-A57, and identify the correct target object, schedule rules, and
-   postprocessors. Only then populate `compiler_target`, `schedule_rules`, and
-   `postprocessors` in `configs/hardware/jetson_nano.json`.
+1. Record the Nano OS, architecture, GCC/Python versions, and isolated TVM
+   wheel/runtime versions for provenance. The Nano does not need an LLVM
+   compiler for the cross-compilation workflow.
+2. The target object `aarch64-linux-gnu` / `cortex-a57` and LLVM schedule rules
+   and postprocessors passed a bounded 48-candidate check. The full search
+   space is not qualified; validate it more broadly and resolve timing noise
+   before populating schedule fields in `configs/hardware/jetson_nano.json`.
 3. Verify SIMD width, cache sizes, and any register assumptions from
    authoritative system or architecture information. Do not copy M2 values.
-4. Resolve the Python 3.6.9/dependency compatibility question before attempting
-   to run this repository on the device. No system-package or JetPack changes
-   are authorized by this refactor.
-5. After configuration and compatibility are approved, run a single known-good
-   CPU schedule for correctness, then a small measured pilot. Only after those
-   checks should the full target-specific collection and evaluation begin.
+4. Continue using the isolated Python 3.10 RPC environment; do not modify
+   system Python, CUDA, JetPack, drivers, or system packages.
+5. After schedule configuration and profiling are approved, run a small
+   measured pilot. Only after those checks should full collection and
+   evaluation begin.
 
 ## Limitations and references
 
-The current harness is still based on the repository's existing TVM
-MetaSchedule implementation and version; it has not been ported or validated
-against the Nano's older software stack. Analytical features are estimates and
-omit hardware counters. The current workload is only one FP32 matrix size.
-Timing quality depends on device power, thermal, and scheduling conditions.
+The RPC path uses the repository's existing TVM MetaSchedule implementation
+and version. Only a small sample of the generated positions has been validated
+on the Nano; the candidate space is much larger. Analytical features are
+estimates and omit hardware counters. The current workload is only one FP32
+matrix size. Timing quality depends on device power, thermal, and scheduling
+conditions.
 
 - Qiao et al., “Pruner,” ASPLOS 2025.
 - Zheng et al., “Ansor: Generating High-Performance Tensor Programs for Deep

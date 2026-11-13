@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -24,11 +25,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.encoding import describe_space, random_position
 from dvcm.config import (
+    TargetConfig,
+    WorkloadConfig,
     add_target_argument,
     load_target_config,
     load_workload_config,
 )
-from dvcm.harness import HarnessConfig, make_matmul, measure
+from dvcm.harness import HarnessConfig, MeasurementResult, make_matmul, measure
+from dvcm.rpc import RPCExecutor
 from dvcm.study import add_schedule_if_new, save_json
 
 N_TARGET = 5000
@@ -126,10 +130,10 @@ def _record(
     sample_id: int,
     sketch_id: int,
     position: np.ndarray,
-    result,
-    build_time_s: float,
+    measurement: MeasurementResult,
     batch_id: int,
 ) -> dict:
+    result = measurement.timing
     return {
         "id": int(sample_id),
         "sketch_id": int(sketch_id),
@@ -138,9 +142,38 @@ def _record(
         "median_ms": result.median_ms,
         "std_ms": result.std_ms,
         "status": result.status,
-        "build_time_s": float(build_time_s),
+        "build_time_s": float(measurement.build_time_s),
+        "export_time_s": float(measurement.export_time_s),
+        "upload_time_s": float(measurement.upload_time_s),
+        "link_load_time_s": float(measurement.link_load_time_s),
         "batch_id": int(batch_id),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _execution_metadata(
+    target_config: TargetConfig,
+    workload: WorkloadConfig,
+    target: tvm.target.Target,
+    rpc_executor: RPCExecutor | None,
+    rpc_host: str | None,
+    rpc_port: int,
+) -> dict[str, Any]:
+    return {
+        "target_id": target_config.target_id,
+        "target_profile": target_config.to_dict(),
+        "workload": workload.to_dict(),
+        "tvm_version": tvm.__version__,
+        "target": str(target),
+        "execution_backend": "rpc" if rpc_executor is not None else "local",
+        "rpc_host": rpc_host,
+        "rpc_port": rpc_port if rpc_executor is not None else None,
+        "rpc_input_prepare_time_s": (
+            rpc_executor.input_prepare_time_s if rpc_executor is not None else 0.0
+        ),
+        "rpc_input_upload_time_s": (
+            rpc_executor.input_upload_time_s if rpc_executor is not None else 0.0
+        ),
     }
 
 
@@ -151,11 +184,18 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--pilot-only", action="store_true")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--rpc-host")
+    parser.add_argument("--rpc-port", type=int, default=9090)
     args = parser.parse_args()
     target_config = load_target_config(args.target, ROOT)
     workload = load_workload_config(root=ROOT)
     target_config.require_benchmarking_profile()
     target = target_config.make_tvm_target()
+    rpc_executor = (
+        RPCExecutor.connect(args.rpc_host, args.rpc_port)
+        if args.rpc_host
+        else None
+    )
     n_target = 30 if args.smoke else args.n
     repeats = 2 if args.smoke else workload.measurement["repeats"]
     number = workload.measurement["number"]
@@ -256,18 +296,25 @@ def main() -> None:
     pending_rows = []
     pilot_sample_ids = []
     pilot_ms = []
-    pilot_build = []
+    pilot_setup = []
     for sample_id, (sketch_id, position) in remaining[:pilot_count]:
-        result, build_s = measure(position, sketches[sketch_id], layouts[sketch_id], config)
-        pending_rows.append(_record(sample_id, sketch_id, position, result, build_s, -1))
+        measurement = measure(
+            position, sketches[sketch_id], layouts[sketch_id], config, rpc_executor
+        )
+        pending_rows.append(_record(sample_id, sketch_id, position, measurement, -1))
         pilot_sample_ids.append(sample_id)
         if len(pending_rows) >= 10:
             _append_rows(pending_rows, pool_path)
             measured_ids.update(int(row["id"]) for row in pending_rows)
             pending_rows.clear()
-        if result.repeats_ms:
-            pilot_ms.append(result.median_ms)
-        pilot_build.append(build_s)
+        if measurement.timing.repeats_ms:
+            pilot_ms.append(measurement.timing.median_ms)
+        pilot_setup.append(
+            measurement.build_time_s
+            + measurement.export_time_s
+            + measurement.upload_time_s
+            + measurement.link_load_time_s
+        )
     if pending_rows:
         _append_rows(pending_rows, pool_path)
         measured_ids.update(int(row["id"]) for row in pending_rows)
@@ -287,12 +334,12 @@ def main() -> None:
         seed=workload.seed,
         slow_threshold_ms=slow_threshold_ms,
     )
-    projection_build = float(np.mean(pilot_build[:20])) if pilot_build else 0.0
+    projection_setup = float(np.mean(pilot_setup[:20])) if pilot_setup else 0.0
     projection_measure = float(np.mean(pilot_ms[:20])) / 1000.0 if pilot_ms else 0.0
     batch_count = (n_target + BATCH_SIZE - 1) // BATCH_SIZE
     projected_seconds = (
         (n_target + batch_count * len(canaries))
-        * (projection_build + projection_measure)
+        * (projection_setup + projection_measure)
         + max(0, batch_count - 1) * cooldown
     )
     print(f"Pilot median: {pilot_median:.6f} ms; slow threshold: {slow_threshold_ms:.6f} ms")
@@ -310,7 +357,7 @@ def main() -> None:
         batch_count = (n_target + BATCH_SIZE - 1) // BATCH_SIZE
         projected_seconds = (
             (n_target + batch_count * len(canaries))
-            * (projection_build + projection_measure)
+            * (projection_setup + projection_measure)
             + max(0, batch_count - 1) * cooldown
         )
         print("Projection exceeds 8 hours; reducing N_TARGET to 3000")
@@ -339,10 +386,12 @@ def main() -> None:
         for canary_id, item in enumerate(canaries):
             sketch_id = int(item["sketch_id"])
             position = np.asarray(item["vector"], dtype=int)
-            result, build_s = measure(position, sketches[sketch_id], layouts[sketch_id], config)
+            measurement = measure(
+                position, sketches[sketch_id], layouts[sketch_id], config, rpc_executor
+            )
             batch_canary_rows.append(
                 {
-                    **_record(-1, sketch_id, position, result, build_s, batch_id),
+                    **_record(-1, sketch_id, position, measurement, batch_id),
                     "canary_id": canary_id,
                 }
             )
@@ -351,10 +400,14 @@ def main() -> None:
 
         for sample_id in batch_indexes:
             sketch_id, position = samples[sample_id]
-            result, build_s = measure(
-                position, sketches[sketch_id], layouts[sketch_id], config
+            measurement = measure(
+                position,
+                sketches[sketch_id],
+                layouts[sketch_id],
+                config,
+                rpc_executor,
             )
-            row = _record(sample_id, sketch_id, position, result, build_s, batch_id)
+            row = _record(sample_id, sketch_id, position, measurement, batch_id)
             pending_rows.append(row)
             if len(pending_rows) >= CHECKPOINT_SIZE:
                 _append_rows(pending_rows, pool_path)
@@ -385,11 +438,14 @@ def main() -> None:
     statuses = Counter(pool["status"])
     ended = datetime.now(timezone.utc)
     meta = {
-        "target_id": target_config.target_id,
-        "target_profile": target_config.to_dict(),
-        "workload": workload.to_dict(),
-        "tvm_version": tvm.__version__,
-        "target": str(target),
+        **_execution_metadata(
+            target_config,
+            workload,
+            target,
+            rpc_executor,
+            args.rpc_host,
+            args.rpc_port,
+        ),
         "machine_model": _mac_value(["sysctl", "-n", "hw.model"]),
         "macos_version": platform.mac_ver()[0] or None,
         "host_platform": platform.platform(),

@@ -23,7 +23,16 @@ def test_target_profiles_keep_m2_compatibility_and_nano_unknowns_explicit():
     assert nano.cpu == "ARM Cortex-A57"
     assert nano.num_cores == 4
     assert nano.paths()[0].as_posix().endswith("data/jetson_nano")
-    assert nano.compiler_target is None
+    assert nano.compiler_target == {
+        "kind": "llvm",
+        "mtriple": "aarch64-linux-gnu",
+        "mcpu": "cortex-a57",
+        "num-cores": 4,
+    }
+    nano_target = nano.make_tvm_target()
+    assert nano_target.kind.name == "llvm"
+    assert nano_target.attrs["mtriple"] == "aarch64-linux-gnu"
+    assert nano_target.attrs["mcpu"] == "cortex-a57"
     with pytest.raises(RuntimeError, match="not configured"):
         nano.require_benchmarking_profile()
     with pytest.raises(ValueError, match="analytical constants"):

@@ -46,14 +46,16 @@ def main() -> None:
     )
     rng = np.random.default_rng(workload.seed)
     for index in range(10):
-        result, build_time = measure(
+        measurement = measure(
             random_position(rng, layout), schedule, layout, config
         )
-        if result.status != "ok":
-            raise RuntimeError(f"Smoke schedule {index} failed: {result.status}")
+        if measurement.timing.status != "ok":
+            raise RuntimeError(
+                f"Smoke schedule {index} failed: {measurement.timing.status}"
+            )
         print(
-            f"{index + 1}/10: {result.median_ms:.4f} ms "
-            f"(build {build_time:.3f} s)"
+            f"{index + 1}/10: {measurement.timing.median_ms:.4f} ms "
+            f"(build {measurement.build_time_s:.3f} s)"
         )
 
 
