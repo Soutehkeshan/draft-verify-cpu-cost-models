@@ -23,8 +23,8 @@
     "-mcpu=cortex-a57",
     "-num-cores=4"
   ],
-  "schedule_rules": null,
-  "postprocessors": null,
+  "schedule_rules": "llvm",
+  "postprocessors": "llvm",
   "thread_settings": {
     "TVM_NUM_THREADS": 4
   },
@@ -40,7 +40,7 @@
     "cuda": "10.2 (not used; this project is CPU-only)"
   },
   "notes": {
-    "status": "Qualification (layout parity, loop order, 150-schedule replay pilot, noise) is recorded under data/nano/qualification; collection remains gated: schedule_rules and postprocessors stay null until the collection gate is explicitly opened.",
+    "status": "Qualification (layout parity, loop order, 150-schedule replay pilot, noise) is recorded under data/nano/qualification. Collection is enabled with explicit llvm schedule rules and postprocessors, which give the same design space as the M2 collection; never use from-target, which selects ARM-specific rules for this target's arm_cpu key.",
     "compiler": "M2 TVM LLVM emits AArch64 code; Nano-side RPC archive linking invoked /usr/bin/g++.",
     "num_cores": "4 online Cortex-A57 cores (lscpu on the Nano); one cpufreq policy spans CPUs 0-3.",
     "cache": "L1D 32 KiB per core (cpu0/cache/index0: level 1, Data, 32K, shared_cpu_list 0) and L2 2 MiB shared (index2: level 2, Unified, 2048K, shared_cpu_list 0-3), read from sysfs and lscpu on the Nano.",

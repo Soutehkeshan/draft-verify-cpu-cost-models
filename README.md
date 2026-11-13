@@ -14,7 +14,7 @@ scheduling are out of scope.
 
 ## Current status
 
-**NANO RPC QUALIFICATION COMPLETE — FULL COLLECTION NOT ENABLED**
+**NANO RPC QUALIFICATION COMPLETE — NANO COLLECTION ENABLED (EXPLICIT `llvm` RULES)**
 
 The M2 successfully cross-compiled and exported AArch64 CPU code for
 `aarch64-linux-gnu` / `cortex-a57`, then loaded and executed it on the Nano
@@ -37,9 +37,9 @@ This is a small validation sample, not proof that all 3,704,400 encoded
 positions are valid or reliable. A broader qualification (layout parity, loop
 order, a 150-schedule stratified replay pilot, and a 20-schedule noise canary)
 is described under "Nano qualification" below; its outputs are in
-`data/nano/`. The Nano profile's schedule rules and postprocessors remain
-unset, so the collection command still refuses to run until that gate is
-explicitly opened. SIMD width, cache sizes, and register count are set from
+`data/nano/`. The Nano profile now sets its schedule rules and postprocessors
+explicitly to `llvm` (never `from-target`, which would pick ARM-specific rules
+for this target), which opens the Nano collection path. SIMD width, cache sizes, and register count are set from
 the Nano's own sysfs, `lscpu`, and ISA information; peak compute and memory
 bandwidth are initial guesses that the analytical fit refines on TRAIN only.
 
@@ -236,8 +236,9 @@ Commit first, or explicitly use `ALLOW_DIRTY=1`; dirty-run provenance is
 recorded when that override is used.
 
 The default `TARGET` is `jetson_nano`, because it is the primary research
-target. Nano collection still stops with an explicit unconfigured-profile
-error before creating target data or result directories. To rerun the two
+target. Sampling new positions (`make data`) is reserved for the M2 target;
+for the Nano, `01_collect.py` stops with an error that points to the
+`--positions-from` replay command under "Nano qualification". To rerun the two
 integration checks through an SSH tunnel, use
 `python scripts/rpc_poc.py --host 127.0.0.1 --port 9090`. This runs one vector
 function and one MetaSchedule matmul candidate; it does not collect schedules.
@@ -343,7 +344,7 @@ decile, fixed seed, no resampling) on the Nano target, checks NumPy
 correctness, times them with the M2 protocol, and records
 `slow_threshold_ms` (20 x pilot median) in `data/nano/run_meta.json`.
 
-The Nano collection path (written, gated, not yet run) re-measures the M2
+The Nano collection path re-measures the M2
 pool's positions in `test_first` order: TEST ids from `data/splits.json`, then
 VALIDATION, then TRAIN in nested-subset order (100, 250, 500, 1000, 2000,
 all). It checkpoints per batch (`--batch-size`, default 250; `--cooldown-s`,
@@ -402,9 +403,8 @@ reported; the qualification timings are diagnostic only.
    The Nano does not need an LLVM compiler for the cross-compilation workflow.
 2. The target `aarch64-linux-gnu` / `cortex-a57` with explicit `llvm` schedule
    rules and postprocessors has design-space and loop-order parity with the M2
-   collection and passed the 150-schedule replay pilot and noise canary. The
-   schedule fields in `configs/hardware/jetson_nano.json` stay unset until the
-   collection gate is opened deliberately.
+   collection and passed the 150-schedule replay pilot and noise canary, so
+   `configs/hardware/jetson_nano.json` now sets both fields to `llvm`.
 3. SIMD width, cache sizes, and register count are set in
    `configs/hardware/jetson_nano.json` with their sources in its `notes`;
    peak compute and bandwidth there are initial guesses, fitted on TRAIN only.
