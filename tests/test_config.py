@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from dvcm.features import features
 import numpy as np
 import pytest
@@ -5,7 +7,7 @@ import pytest
 from dvcm.config import LEGACY_TARGET, load_target_config, load_workload_config
 
 
-def test_target_profiles_keep_m2_compatibility_and_nano_gate_closed():
+def test_target_profiles_keep_m2_compatibility_and_nano_uses_explicit_llvm():
     m2 = load_target_config(LEGACY_TARGET)
     assert m2.compiler_target == {
         "kind": "llvm",
@@ -33,8 +35,12 @@ def test_target_profiles_keep_m2_compatibility_and_nano_gate_closed():
     assert nano_target.kind.name == "llvm"
     assert nano_target.attrs["mtriple"] == "aarch64-linux-gnu"
     assert nano_target.attrs["mcpu"] == "cortex-a57"
+    # Explicit llvm rules match the M2 collection; "from-target" would pick ARM rules.
+    assert (nano.schedule_rules, nano.postprocessors) == ("llvm", "llvm")
+    assert (nano.schedule_rules, nano.postprocessors) == (m2.schedule_rules, m2.postprocessors)
+    nano.require_benchmarking_profile()
     with pytest.raises(RuntimeError, match="not configured"):
-        nano.require_benchmarking_profile()
+        replace(nano, schedule_rules=None).require_benchmarking_profile()
     assert nano.analytic_constants() == {
         "peak_flops": 4 * 1.479e9 * 8,
         "bandwidth_bytes_s": 1e10,

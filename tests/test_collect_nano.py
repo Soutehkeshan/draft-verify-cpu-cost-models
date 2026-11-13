@@ -201,9 +201,8 @@ def test_collection_refuses_without_threshold_and_pilot_report(tmp_path):
     assert collector.require_pilot_threshold(tmp_path)["slow_threshold_ms"] == 700.0
 
 
-def test_nano_positions_path_stays_gated_and_never_connects(tmp_path, monkeypatch):
+def test_real_nano_profile_refuses_without_pilot_before_connecting(tmp_path, monkeypatch):
     collector = _collector()
-    _qualified_output(collector, tmp_path)
     monkeypatch.setattr(
         collector.RPCExecutor, "connect", lambda *_: pytest.fail("must not connect")
     )
@@ -217,7 +216,7 @@ def test_nano_positions_path_stays_gated_and_never_connects(tmp_path, monkeypatc
             "--ssh-target", "nano", "--output-dir", str(tmp_path),
         ],
     )
-    with pytest.raises(RuntimeError, match="not configured"):
+    with pytest.raises(SystemExit, match="run_meta.json does not exist"):
         collector.main()
     assert not (tmp_path / "pool.parquet").exists()
 
