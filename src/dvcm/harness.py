@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from functools import lru_cache
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import tvm
 from tvm import te
 from tvm.s_tir import meta_schedule as ms
+
+from dvcm.rpc import RPCExecutor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +49,15 @@ class TimingResult:
     status: str
 
 
+@dataclass(frozen=True)
+class MeasurementResult:
+    timing: TimingResult
+    build_time_s: float
+    export_time_s: float = 0.0
+    upload_time_s: float = 0.0
+    link_load_time_s: float = 0.0
+
+
 def make_matmul(n: int) -> tvm.tirx.PrimFunc:
     """Return a TIR PrimFunc computing C = A @ B for n x n float32 matrices."""
     a = te.placeholder((n, n), dtype="float32", name="A")
@@ -70,8 +81,12 @@ def _cached_inputs(n: int, seed: int) -> tuple[Any, Any, Any, np.ndarray]:
     return a, b, c, reference
 
 
-def prepare_inputs(config: HarnessConfig) -> tuple[Any, Any, Any, np.ndarray]:
-    """Return cached device inputs and their NumPy reference result."""
+def prepare_inputs(
+    config: HarnessConfig, rpc_executor: RPCExecutor | None = None
+) -> tuple[Any, Any, Any, np.ndarray]:
+    """Return cached inputs and their NumPy reference result."""
+    if rpc_executor is not None:
+        return rpc_executor.prepare_inputs(config.n, config.seed)
     return _cached_inputs(config.n, config.seed)
 
 
@@ -88,10 +103,20 @@ def _stats(values: tuple[float, ...], status: str) -> TimingResult:
     )
 
 
-def time_module(lib: Any, config: HarnessConfig) -> TimingResult:
+def time_module(
+    lib: Any,
+    config: HarnessConfig,
+    rpc_executor: RPCExecutor | None = None,
+    timing_marker: Callable[[str, str], None] | None = None,
+    timing_label: str | None = None,
+) -> TimingResult:
     """Check correctness and time a compiled module using a consistent protocol."""
-    a, b, c, reference = prepare_inputs(config)
-    device = tvm.cpu()
+    if (timing_marker is None) != (timing_label is None):
+        raise ValueError("timing_marker and timing_label must be supplied together")
+    if timing_marker is not None and rpc_executor is None:
+        raise ValueError("timing markers are supported only for RPC measurements")
+    a, b, c, reference = prepare_inputs(config, rpc_executor)
+    device = rpc_executor.device if rpc_executor is not None else tvm.cpu()
     mod = lib if hasattr(lib, "time_evaluator") else lib.jit()
     entry = mod["main"]
     _zero_output(c, config)
@@ -102,21 +127,38 @@ def time_module(lib: Any, config: HarnessConfig) -> TimingResult:
         LOGGER.exception("Compiled schedule returned an incorrect result")
         return TimingResult((), float("nan"), float("nan"), "wrong_result")
 
-    _zero_output(c, config)
-    single_start = time.perf_counter()
-    entry(a, b, c)
-    single_ms = (time.perf_counter() - single_start) * 1000.0
+    if rpc_executor is None:
+        _zero_output(c, config)
+        single_start = time.perf_counter()
+        entry(a, b, c)
+        single_ms = (time.perf_counter() - single_start) * 1000.0
+    else:
+        single_result = mod.time_evaluator(
+            "main", device, repeat=1, number=1, min_repeat_ms=0
+        )(a, b, c)
+        single_ms = float(single_result.results[0]) * 1000.0
     if single_ms > config.slow_threshold_ms:
         return _stats((single_ms,), "slow_skip")
 
-    _zero_output(c, config)
-    result = mod.time_evaluator(
+    if rpc_executor is None:
+        _zero_output(c, config)
+    evaluator = mod.time_evaluator(
         "main",
         device,
         repeat=config.repeats,
         number=config.number,
         min_repeat_ms=config.min_repeat_ms,
-    )(a, b, c)
+    )
+    if timing_marker is None:
+        result = evaluator(a, b, c)
+    else:
+        if timing_label is None:
+            raise ValueError("timing_label is required when timing_marker is set")
+        timing_marker("start", timing_label)
+        try:
+            result = evaluator(a, b, c)
+        finally:
+            timing_marker("end", timing_label)
     repeats_ms = tuple(float(value) * 1000.0 for value in result.results)
     return _stats(repeats_ms, "ok")
 
@@ -162,11 +204,34 @@ def measure(
     design_space_trace: Any,
     layout: dict[str, Any],
     config: HarnessConfig,
-) -> tuple[TimingResult, float]:
-    """Build and measure one schedule, returning timing and build duration."""
+    rpc_executor: RPCExecutor | None = None,
+    timing_marker: Callable[[str, str], None] | None = None,
+    timing_label: str | None = None,
+) -> MeasurementResult:
+    """Build and measure one schedule on the local or optional remote CPU."""
     start = time.perf_counter()
     lib, status = build_from_position(position, design_space_trace, layout, config)
     build_time_s = time.perf_counter() - start
     if lib is None:
-        return TimingResult((), float("nan"), float("nan"), status), build_time_s
-    return time_module(lib, config), build_time_s
+        return MeasurementResult(
+            TimingResult((), float("nan"), float("nan"), status),
+            build_time_s,
+        )
+    if rpc_executor is None:
+        return MeasurementResult(time_module(lib, config), build_time_s)
+
+    remote_library = rpc_executor.load_module(lib)
+    timing = time_module(
+        remote_library.module,
+        config,
+        rpc_executor,
+        timing_marker=timing_marker,
+        timing_label=timing_label,
+    )
+    return MeasurementResult(
+        timing=timing,
+        build_time_s=build_time_s,
+        export_time_s=remote_library.export_time_s,
+        upload_time_s=remote_library.upload_time_s,
+        link_load_time_s=remote_library.link_load_time_s,
+    )

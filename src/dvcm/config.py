@@ -106,7 +106,10 @@ class TargetConfig:
             )
 
     def make_tvm_target(self):
-        self.require_benchmarking_profile()
+        if self.compiler_target is None:
+            raise RuntimeError(
+                f"Target {self.target_id} has no verified TVM compiler target"
+            )
         import tvm
 
         return tvm.target.Target(self.compiler_target)

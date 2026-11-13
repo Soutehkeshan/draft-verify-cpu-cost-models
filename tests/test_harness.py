@@ -1,9 +1,11 @@
 import hashlib
+from types import SimpleNamespace
 
 import numpy as np
 from tvm.s_tir import meta_schedule as ms
 from tvm.s_tir.meta_schedule.space_generator import PostOrderApply
 
+import dvcm.harness as harness
 from dvcm.encoding import decisions_to_position, describe_space
 from dvcm.config import LEGACY_TARGET, load_target_config, load_workload_config
 from dvcm.harness import (
@@ -13,6 +15,7 @@ from dvcm.harness import (
     make_matmul,
     time_module,
 )
+from dvcm.rpc import RPCExecutor
 
 
 def _first_design_space():
@@ -83,3 +86,67 @@ def test_known_good_schedule_builds_and_passes_correctness():
     assert result.status == "ok"
     assert len(result.repeats_ms) == config.repeats
     assert np.isfinite(result.median_ms)
+
+
+def test_timing_markers_bracket_only_repeated_rpc_evaluator(monkeypatch):
+    reference = np.zeros((1, 1), dtype=np.float32)
+
+    class Output:
+        def copyfrom(self, value):
+            pass
+
+        def numpy(self):
+            return reference
+
+    class Library:
+        def __getitem__(self, name):
+            assert name == "main"
+            return lambda *args: None
+
+        def time_evaluator(self, name, device, repeat, number, min_repeat_ms):
+            assert name == "main"
+            if repeat == 1:
+                return lambda *args: SimpleNamespace(results=(0.001,))
+
+            def evaluate(*args):
+                events.append("evaluator")
+                return SimpleNamespace(results=(0.002, 0.004))
+
+            return evaluate
+
+    events = []
+    monkeypatch.setattr(
+        harness,
+        "prepare_inputs",
+        lambda config, rpc_executor: (object(), object(), Output(), reference),
+    )
+    monkeypatch.setattr(harness, "_zero_output", lambda output, config: None)
+    class Session:
+        def cpu(self):
+            return "remote_cpu"
+
+    config = HarnessConfig(
+        target="llvm",
+        postprocessors="llvm",
+        n=1,
+        repeats=2,
+        number=1,
+        min_repeat_ms=20,
+        seed=0,
+        slow_threshold_ms=float("inf"),
+    )
+
+    result = time_module(
+        Library(),
+        config,
+        rpc_executor=RPCExecutor(Session()),
+        timing_marker=lambda action, label: events.append((action, label)),
+        timing_label="sketch-0-batch-0",
+    )
+
+    assert events == [
+        ("start", "sketch-0-batch-0"),
+        "evaluator",
+        ("end", "sketch-0-batch-0"),
+    ]
+    assert result.repeats_ms == (2.0, 4.0)
