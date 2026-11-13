@@ -292,6 +292,62 @@ def decisions_to_position(trace, layout=None):
     return position
 
 
+def layout_to_json(layout, sketch_id):
+    """Serialize the structural fields of a describe_space() layout."""
+    return {
+        "sketch_id": int(sketch_id),
+        "tiles": [
+            {
+                "n": int(tile["n"]),
+                "extent": int(tile["extent"]),
+                "total_exp": int(tile["total_exp"]),
+                "max_inner_exp": int(tile["max_inner_exp"]),
+                "max_inner_factor": int(tile["max_inner_factor"]),
+                "slice": [int(tile["slice"].start), int(tile["slice"].stop)],
+            }
+            for tile in layout["tiles"]
+        ],
+        "categoricals": [
+            {
+                "index": int(category["index"]),
+                "candidates": [int(candidate) for candidate in category["candidates"]],
+            }
+            for category in layout["categoricals"]
+        ],
+        "dim": int(layout["dim"]),
+        "parallel_tile_levels": {
+            "i": int(layout["parallel_tile_levels"]["i"]),
+            "j": int(layout["parallel_tile_levels"]["j"]),
+        },
+    }
+
+
+STRUCTURAL_LAYOUT_KEYS = ("sketch_id", "tiles", "categoricals", "dim", "parallel_tile_levels")
+
+
+def structural_layout(layout_json):
+    """Return only the schedule-space fields of a serialized layout (no target values)."""
+    return {key: layout_json[key] for key in STRUCTURAL_LAYOUT_KEYS}
+
+
+def tile_choice_count(tile):
+    """Number of valid exponent compositions for one tile group (live or JSON layout)."""
+    choices = tile.get("valid_exponents")
+    if choices is None:
+        choices = _valid_tile_exponents(
+            int(tile["n"]), int(tile["total_exp"]), int(tile["max_inner_exp"])
+        )
+    return len(choices)
+
+
+def space_size(layout):
+    """Number of valid encoded positions implied by a live or JSON layout."""
+    return math.prod(
+        [tile_choice_count(tile) for tile in layout["tiles"]]
+        + [len(category["candidates"]) for category in layout["categoricals"]]
+    )
+
+
 def _valid_tile_exponents(n, total, max_inner):
     """Enumerate bounded exponent compositions for uniform valid-tile sampling."""
     compositions = []
