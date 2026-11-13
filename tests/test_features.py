@@ -5,6 +5,7 @@ from dvcm.analytic import AnalyticConstants, Penalties, latency_seconds, penalty
 from dvcm.features import (
     ALL_DERIVED_NAMES,
     DERIVED_NAMES,
+    bind_target_settings,
     derived,
     feature_names,
     features,
@@ -38,6 +39,25 @@ def _m2_constants(**overrides):
     values = load_target_config(LEGACY_TARGET).analytic_constants()
     values.update(overrides)
     return AnalyticConstants(**values)
+
+
+def test_nano_constants_and_feature_binding_come_from_the_nano_profile():
+    nano = load_target_config("jetson_nano")
+    constants = AnalyticConstants.from_target(nano)
+    assert (constants.l1_bytes, constants.l2_bytes) == (32768, 2097152)
+    assert (constants.lane_width, constants.num_cores, constants.vector_registers) == (4, 4, 32)
+    m2 = AnalyticConstants.from_target(load_target_config(LEGACY_TARGET))
+    assert constants.peak_flops != m2.peak_flops
+    assert constants.bandwidth_bytes_s != m2.bandwidth_bytes_s
+
+    layout = {**_layout(), "vector_lanes": 8, "num_cores": 8, "vector_registers": 16}
+    bound = bind_target_settings(layout, nano)
+    assert (bound["vector_lanes"], bound["num_cores"], bound["vector_registers"]) == (4, 4, 32)
+    assert layout["vector_lanes"] == 8  # input layout is not mutated
+    # A 2 MiB L2 penalises the large tile that fits the M2's 16 MiB L2.
+    _, large_tile = _positions()
+    assert penalty_terms(large_tile, bound, constants)["cache_l2"] < 1.0
+    assert penalty_terms(large_tile, _layout(), m2)["cache_l2"] == 1.0
 
 
 def test_flops_and_bytes_are_correct_for_tiny_and_large_tiles():

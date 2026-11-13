@@ -38,6 +38,17 @@ class AnalyticConstants:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_target(cls, target: Any) -> AnalyticConstants:
+        """Read every value from the selected hardware profile (configs/hardware/).
+
+        Cache sizes, lane width, core count, and register count are the profile's
+        hardware values. peak_flops and bandwidth_bytes_s are initial guesses that
+        fit_constants() refits on TRAIN only. Missing profile values raise; no
+        other target's values are substituted.
+        """
+        return cls(**target.analytic_constants())
+
 
 @dataclass(frozen=True)
 class Penalties:

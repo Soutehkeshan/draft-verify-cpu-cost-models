@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 
 import pytest
@@ -60,12 +61,21 @@ def test_target_binding_does_not_reuse_legacy_layout_hardware_values(tmp_path):
         "num_cores": 4,
         "vector_registers": 32,
     }
+    layout.update({"vector_lanes": 8, "num_cores": 8, "vector_registers": 16})
     (tmp_path / "layout_0.json").write_text(json.dumps(layout))
+    nano = load_target_config("jetson_nano")
 
-    nano_layout = load_layouts(
-        tmp_path, load_target_config("jetson_nano")
-    )[0]
+    nano_layout = load_layouts(tmp_path, nano)[0]
 
-    assert nano_layout["num_cores"] == 4
-    assert "vector_lanes" not in nano_layout
-    assert "vector_registers" not in nano_layout
+    assert (
+        nano_layout["vector_lanes"],
+        nano_layout["num_cores"],
+        nano_layout["vector_registers"],
+    ) == (4, 4, 32)
+
+    unverified = replace(nano, simd_width_f32=None, vector_registers=None)
+    unverified_layout = load_layouts(tmp_path, unverified)[0]
+
+    assert unverified_layout["num_cores"] == 4
+    assert "vector_lanes" not in unverified_layout
+    assert "vector_registers" not in unverified_layout

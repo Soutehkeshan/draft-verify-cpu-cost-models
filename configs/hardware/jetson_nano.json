@@ -5,12 +5,12 @@
   "architecture": "aarch64",
   "cpu": "ARM Cortex-A57",
   "num_cores": 4,
-  "simd_width_f32": null,
-  "l1_data_cache_bytes": null,
-  "l2_cache_bytes": null,
-  "vector_registers": null,
-  "peak_flops": null,
-  "bandwidth_bytes_s": null,
+  "simd_width_f32": 4,
+  "l1_data_cache_bytes": 32768,
+  "l2_cache_bytes": 2097152,
+  "vector_registers": 32,
+  "peak_flops": 47328000000.0,
+  "bandwidth_bytes_s": 10000000000.0,
   "compiler_target": {
     "kind": "llvm",
     "mtriple": "aarch64-linux-gnu",
@@ -28,7 +28,7 @@
   "thread_settings": {
     "TVM_NUM_THREADS": 4
   },
-  "data_dir": "data/jetson_nano",
+  "data_dir": "data/nano",
   "results_dir": "results/jetson_nano",
   "environment": {
     "os": "Ubuntu 18.04.5",
@@ -40,7 +40,12 @@
     "cuda": "10.2 (not used; this project is CPU-only)"
   },
   "notes": {
-    "status": "RPC qualification tested LLVM schedule rules and postprocessors on 48 candidates across all three sketches; collection remains gated pending broader validation and timing-stability review.",
-    "compiler": "M2 TVM LLVM emits AArch64 code; Nano-side RPC archive linking invoked /usr/bin/g++."
+    "status": "Qualification (layout parity, loop order, 150-schedule replay pilot, noise) is recorded under data/nano/qualification; collection remains gated: schedule_rules and postprocessors stay null until the collection gate is explicitly opened.",
+    "compiler": "M2 TVM LLVM emits AArch64 code; Nano-side RPC archive linking invoked /usr/bin/g++.",
+    "num_cores": "4 online Cortex-A57 cores (lscpu on the Nano); one cpufreq policy spans CPUs 0-3.",
+    "cache": "L1D 32 KiB per core (cpu0/cache/index0: level 1, Data, 32K, shared_cpu_list 0) and L2 2 MiB shared (index2: level 2, Unified, 2048K, shared_cpu_list 0-3), read from sysfs and lscpu on the Nano.",
+    "simd": "AArch64 Advanced SIMD ('asimd' in /proc/cpuinfo): 128-bit vectors = 4 FP32 lanes and 32 architectural V registers (V0-V31). Cross-compiled schedules emit fmla v.4s (j3 >= 4) and fmla v.2s (j3 = 2).",
+    "peak_flops": "initial guess, fitted on TRAIN only: 4 cores x 1.479e9 Hz (cpuinfo_max_freq) x 8 FP32 FLOP/cycle (one 128-bit FMLA per cycle per core). scripts/nano_fma_peak.c measured 11.80 GFLOP/s on one core (7.98 FLOP/cycle) and 46.5 GFLOP/s on four cores at 1479 MHz, so this is an attainable FMA ceiling, not a matmul throughput or a specification.",
+    "bandwidth_bytes_s": "initial guess, fitted on TRAIN only: ~1e10 B/s, rounded from the 4-thread parallel-vector test (2 x 16 MiB read+write in 3.090 ms = 1.09e10 B/s; results/jetson_nano/validate_threading_4t_configured.json); not a specification."
   }
 }
