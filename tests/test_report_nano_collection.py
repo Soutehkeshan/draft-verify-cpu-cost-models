@@ -42,7 +42,8 @@ def _collection(tmp_path: Path) -> tuple[Path, Path]:
         json.dumps(batch) + "\n" + json.dumps({**batch, "batch_id": 1}) + "\n"
     )
     (data / "run_meta.json").write_text(json.dumps(
-        {"collection": {"state": "running", "reconnects": 0, "last_update": "2026-11-13T23:00:01+00:00"}}
+        {"collection": {"state": "running", "reconnects": 0, "rpc_sessions_opened": 1,
+                        "last_update": "2026-11-13T23:00:01+00:00"}}
     ))
     return data, m2
 

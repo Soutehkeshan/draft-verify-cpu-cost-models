@@ -603,9 +603,19 @@ def collect_from_positions(
         slow_threshold_ms=threshold,
     )
     expected_environment = run_meta["rpc_server"]["environment"]
-    first_start = (run_meta.get("collection") or {}).get("start_timestamp")
-    start_timestamp = first_start or datetime.now(timezone.utc).isoformat()
+    previous = run_meta.get("collection") or {}
+    start_timestamp = previous.get("start_timestamp") or datetime.now(timezone.utc).isoformat()
+    if set(order) <= measured:
+        print(f"Collection already complete: {len(order)}/{len(order)} measured")
+        return
+    # Session indices count every RPC session opened for this output directory,
+    # across restarts, so rows from different sessions stay distinguishable.
+    sessions_before = int(previous.get("rpc_sessions_opened", 0))
     session = RemoteSession(args.rpc_host, args.rpc_port)
+
+    def session_index() -> int:
+        return sessions_before + session.reconnects
+
     run_state = {"state": "running", "reason": None}
 
     def save_progress() -> None:
@@ -643,6 +653,8 @@ def collect_from_positions(
             "status_counts": {name: int(count) for name, count in statuses.items()},
             "collection_complete": set(order) <= measured,
             "reconnects": session.reconnects,
+            "rpc_sessions_opened": session_index() + 1,
+            "rpc_session_index_current": session_index(),
             "start_timestamp": start_timestamp,
             "last_update": datetime.now(timezone.utc).isoformat(),
             "host_platform": platform.platform(),
@@ -685,7 +697,7 @@ def collect_from_positions(
                 _check_server_environment(before, expected_environment)
             except RuntimeError as error:
                 pause(str(error))
-            session_at_start = session.reconnects
+            session_at_start = session_index()
             rows: list[dict] = []
             canary_rows: list[dict] = []
             pause_reason = None
@@ -728,7 +740,7 @@ def collect_from_positions(
             finally:
                 after, after_errors = _probe(args.ssh_target)
                 state = _device_state_record(
-                    before, after, errors + after_errors, (session_at_start, session.reconnects)
+                    before, after, errors + after_errors, (session_at_start, session_index())
                 )
                 for row in rows + canary_rows:
                     row["target_id"] = target_config.target_id
@@ -771,7 +783,7 @@ def collect_from_positions(
                 "frequency": frequency,
                 "temperature_c": {"min": min(temperatures, default=None),
                                   "max": max(temperatures, default=None)},
-                "rpc_session_index": {"batch_start": session_at_start, "batch_end": session.reconnects},
+                "rpc_session_index": {"batch_start": session_at_start, "batch_end": session_index()},
                 "pause_reason": pause_reason,
             }
             with batch_log_path.open("a", encoding="utf-8") as stream:

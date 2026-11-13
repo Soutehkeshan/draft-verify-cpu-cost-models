@@ -264,6 +264,7 @@ def test_positions_collection_checkpoints_per_batch_resumes_and_retries_once(pos
     assert collection["state"] == "complete" and collection["collection_complete"] is True
     assert collection["status_counts"] == {"ok": 5}
     assert collection["reconnects"] == 1
+    assert collection["rpc_sessions_opened"] == 2  # initial session + one reconnect
     assert collection["batch_size"] == 2 and collection["cooldown_s"] == 60.0
     assert collection["git_commit"] == collection["provenance"]["git_commit"]
     assert collection["canary_baseline"] == "pilot median (canary.json)"
@@ -271,7 +272,27 @@ def test_positions_collection_checkpoints_per_batch_resumes_and_retries_once(pos
     run.calls.clear()
     run.collect()
     assert run.calls == []  # resumable: nothing is re-measured
+    assert len(run.connects) == 2  # a complete run does not open another session
     assert len(pd.read_parquet(run.out / "pool.parquet")) == 5
+
+
+def test_restarted_run_records_a_new_rpc_session_index(positions_run):
+    run = positions_run
+    run.statuses[13] = "slow_skip"  # batch 1 = [13, 14]: 50% non-ok -> pause
+    _paused(run)
+    run.statuses.clear()
+    run.collect()  # restart: a new RPC session measures the last batch
+    pool = pd.read_parquet(run.out / "pool.parquet")
+    sessions = [json.loads(s)["rpc_session_index"] for s in pool["device_state"]]
+    assert pool["batch_id"].tolist() == [0, 0, 1, 1, 2]
+    assert sessions[0] == sessions[3] == {"batch_start": 0, "batch_end": 0}
+    assert sessions[4] == {"batch_start": 1, "batch_end": 1}
+    collection = json.loads((run.out / "run_meta.json").read_text())["collection"]
+    assert collection["rpc_sessions_opened"] == 2 and collection["state"] == "complete"
+    spec = importlib.util.spec_from_file_location("report", ROOT / "scripts" / "report_nano_collection.py")
+    reporter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reporter)
+    assert "Stayed in one RPC session: **no**" in reporter.build_report(run.out, run.out / "missing.parquet")
 
 
 def _paused(run) -> dict:
