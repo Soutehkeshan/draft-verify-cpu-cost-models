@@ -222,6 +222,16 @@ def test_nano_positions_path_stays_gated_and_never_connects(tmp_path, monkeypatc
     assert not (tmp_path / "pool.parquet").exists()
 
 
+def test_sampling_path_is_reserved_for_the_m2_target(monkeypatch, capsys):
+    collector = _collector()
+    monkeypatch.setattr(sys, "argv", ["01_collect.py", "--target", "jetson_nano"])
+    monkeypatch.setattr(collector.RPCExecutor, "connect", lambda *_: pytest.fail("must not connect"))
+    with pytest.raises(SystemExit) as stopped:
+        collector.main()
+    assert stopped.value.code == 2
+    assert "--positions-from" in capsys.readouterr().err
+
+
 def test_positions_collection_checkpoints_per_batch_resumes_and_retries_once(positions_run):
     run = positions_run
     run.failures[11] = 1  # one dropped RPC call, recovered by the single retry
