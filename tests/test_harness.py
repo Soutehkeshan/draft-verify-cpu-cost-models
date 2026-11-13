@@ -86,6 +86,9 @@ def test_known_good_schedule_builds_and_passes_correctness():
     assert result.status == "ok"
     assert len(result.repeats_ms) == config.repeats
     assert np.isfinite(result.median_ms)
+    # Max |C - A@B| is reported alongside the rtol=atol=1e-4 check.
+    assert result.max_abs_error is not None
+    assert 0.0 <= result.max_abs_error < 1e-4 + 1e-4 * workload.k
 
 
 def test_timing_markers_bracket_only_repeated_rpc_evaluator(monkeypatch):

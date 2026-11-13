@@ -47,6 +47,7 @@ class TimingResult:
     median_ms: float
     std_ms: float
     status: str
+    max_abs_error: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,12 +95,15 @@ def _zero_output(c: Any, config: HarnessConfig) -> None:
     c.copyfrom(np.zeros((config.n, config.n), dtype="float32"))
 
 
-def _stats(values: tuple[float, ...], status: str) -> TimingResult:
+def _stats(
+    values: tuple[float, ...], status: str, max_abs_error: float | None = None
+) -> TimingResult:
     return TimingResult(
         repeats_ms=values,
         median_ms=float(np.median(values)),
         std_ms=float(np.std(values)),
         status=status,
+        max_abs_error=max_abs_error,
     )
 
 
@@ -121,11 +125,15 @@ def time_module(
     entry = mod["main"]
     _zero_output(c, config)
     entry(a, b, c)
+    output = c.numpy()
+    max_abs_error = float(np.max(np.abs(output - reference)))
     try:
-        np.testing.assert_allclose(c.numpy(), reference, rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(output, reference, rtol=1e-4, atol=1e-4)
     except AssertionError:
         LOGGER.exception("Compiled schedule returned an incorrect result")
-        return TimingResult((), float("nan"), float("nan"), "wrong_result")
+        return TimingResult(
+            (), float("nan"), float("nan"), "wrong_result", max_abs_error
+        )
 
     if rpc_executor is None:
         _zero_output(c, config)
@@ -138,7 +146,7 @@ def time_module(
         )(a, b, c)
         single_ms = float(single_result.results[0]) * 1000.0
     if single_ms > config.slow_threshold_ms:
-        return _stats((single_ms,), "slow_skip")
+        return _stats((single_ms,), "slow_skip", max_abs_error)
 
     if rpc_executor is None:
         _zero_output(c, config)
@@ -160,7 +168,7 @@ def time_module(
         finally:
             timing_marker("end", timing_label)
     repeats_ms = tuple(float(value) * 1000.0 for value in result.results)
-    return _stats(repeats_ms, "ok")
+    return _stats(repeats_ms, "ok", max_abs_error)
 
 
 def _schedule_from_position(
