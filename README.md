@@ -364,6 +364,12 @@ PYTHONPATH=src python scripts/01_collect.py --target jetson_nano \
   --order test_first --ssh-target arad@jetson-nano.local [--n 752]
 ```
 
+`python scripts/report_nano_collection.py` (safe to run at any time, also
+during collection) writes `data/nano/collection_report.md`: rows by status,
+RPC session indices, per-batch canary drift, frequency and temperature,
+throttling, M2-vs-Nano Spearman (pooled and per sketch), the Nano latency
+distribution, and output checksums.
+
 ## What is tested and what remains
 
 **Tested locally:** profile loading and validation; target-bound feature
