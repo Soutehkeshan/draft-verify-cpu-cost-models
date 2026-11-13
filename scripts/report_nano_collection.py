@@ -101,10 +101,14 @@ def build_report(data_dir: Path, m2_pool_path: Path) -> str:
         lambda text: json.loads(text).get("rpc_session_index", {})
     )
     session_rows = [[int(batch), s.get("batch_start"), s.get("batch_end")] for batch, s in sessions.items()]
-    one_session = all(row[1] == row[2] == 0 for row in session_rows) and not collection.get("reconnects")
+    indices = {row[1] for row in session_rows} | {row[2] for row in session_rows}
+    opened = collection.get("rpc_sessions_opened")
+    one_session = len(indices) <= 1 and (opened == 1 if opened is not None else not collection.get("reconnects"))
     lines += ["", "## RPC sessions", "",
               f"Stayed in one RPC session: **{'yes' if one_session else 'no'}** "
-              f"(reconnects: {collection.get('reconnects', 'n/a')}).", ""]
+              f"(RPC sessions opened: {opened if opened is not None else 'n/a'}; session indices "
+              f"seen: {sorted(indices)}; reconnects in the latest invocation: "
+              f"{collection.get('reconnects', 'n/a')}).", ""]
     lines += _table(["batch", "session index at start", "session index at end"], session_rows)
 
     lines += ["", "## Canary drift, frequency and temperature per batch", ""]
