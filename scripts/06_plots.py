@@ -20,23 +20,37 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.analytic import AnalyticConstants, latency_seconds
+from dvcm.config import (
+    add_target_argument,
+    experiment_metadata,
+    load_target_config,
+    load_workload_config,
+)
 from dvcm.features import features
 from dvcm.metrics import spearman
 from dvcm.provenance import capture_provenance, pdf_metadata
-from dvcm.study import RESULTS_DIR, load_layouts, load_pool, load_splits
+from dvcm.study import load_layouts, load_pool, load_splits
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    add_target_argument(parser)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
-    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+    target = load_target_config(args.target, ROOT)
+    workload = load_workload_config(root=ROOT)
+    data_dir, results_dir = target.paths(ROOT)
+    provenance = capture_provenance(
+        ROOT,
+        allow_dirty=args.allow_dirty,
+        run_context=experiment_metadata(target, workload, data_dir),
+    )
 
-    plots = RESULTS_DIR / "plots"
+    plots = results_dir / "plots"
     plots.mkdir(parents=True, exist_ok=True)
-    evaluation = pd.read_csv(RESULTS_DIR / "evaluation.csv")
-    learning = pd.read_csv(RESULTS_DIR / "learning_curve.csv")
-    draft = pd.read_csv(RESULTS_DIR / "draft_verify.csv")
+    evaluation = pd.read_csv(results_dir / "evaluation.csv")
+    learning = pd.read_csv(results_dir / "learning_curve.csv")
+    draft = pd.read_csv(results_dir / "draft_verify.csv")
     evaluation = evaluation[evaluation["scope"] == "pooled"]
     learning = learning[learning["scope"] == "pooled"]
     draft = draft[draft["scope"] == "pooled"]
@@ -101,7 +115,7 @@ def main() -> None:
     axes[1, 0].legend(fontsize="small")
     axes[1, 0].grid(True, alpha=0.25)
 
-    canary_path = RESULTS_DIR / "canary.csv"
+    canary_path = results_dir / "canary.csv"
     if canary_path.exists():
         canary = pd.read_csv(canary_path)
         canary = canary[canary["status"].isin(("ok", "slow_skip"))]
@@ -117,11 +131,11 @@ def main() -> None:
     figure.savefig(plots / "overview.pdf", metadata=pdf_metadata(provenance))
     plt.close(figure)
 
-    with (RESULTS_DIR / "constants.json").open(encoding="utf-8") as source:
+    with (results_dir / "constants.json").open(encoding="utf-8") as source:
         constants = AnalyticConstants(**json.load(source)["constants"])
-    layouts = load_layouts()
-    pool = load_pool()
-    test_ids = set(load_splits()["test"])
+    layouts = load_layouts(data_dir, target)
+    pool = load_pool(data_dir=data_dir)
+    test_ids = set(load_splits(data_dir)["test"])
     test = pool[pool["id"].astype(int).isin(test_ids)].reset_index(drop=True)
     matrices = []
     for row in test.itertuples(index=False):
@@ -137,7 +151,7 @@ def main() -> None:
     prediction = []
     for seed in range(5):
         model = XGBRegressor()
-        model.load_model(RESULTS_DIR / "models" / f"base_analytic_nall_seed{seed}.json")
+        model.load_model(results_dir / "models" / f"base_analytic_nall_seed{seed}.json")
         prediction.append(np.exp(model.predict(np.asarray(matrices))))
     predicted = np.mean(prediction, axis=0)
     measured = test["median_ms"].to_numpy(dtype=float)

@@ -17,17 +17,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.analytic import AnalyticConstants, Penalties, latency_seconds
+from dvcm.config import (
+    add_target_argument,
+    experiment_metadata,
+    load_target_config,
+    load_workload_config,
+)
 from dvcm.features import features
 from dvcm.learned import train_xgb
 from dvcm.metrics import (
-    fastest_decile_spearman,
+    ranking_metrics,
     spearman,
     top_k_latency_ratio,
-    top_k_recall,
 )
 from dvcm.provenance import capture_provenance, write_csv
 from dvcm.study import (
-    RESULTS_DIR,
     load_layouts,
     load_pool,
     load_splits,
@@ -35,8 +39,8 @@ from dvcm.study import (
 )
 
 
-def _read_constants() -> tuple[AnalyticConstants, AnalyticConstants]:
-    with (RESULTS_DIR / "constants.json").open(encoding="utf-8") as source:
+def _read_constants(results_dir: Path) -> tuple[AnalyticConstants, AnalyticConstants]:
+    with (results_dir / "constants.json").open(encoding="utf-8") as source:
         payload = json.load(source)
     return (
         AnalyticConstants(**payload["hand_set_constants"]),
@@ -56,28 +60,26 @@ def _model_features(frame, layouts, include_derived, constants):
     return np.asarray(matrices, dtype=float)
 
 
-def _predict_model_seed(frame, layouts, constants, feature_set, size_name, seed):
+def _predict_model_seed(
+    frame,
+    layouts,
+    constants,
+    feature_set,
+    size_name,
+    seed,
+    results_dir,
+):
     include_derived = feature_set == "base_analytic"
     values = _model_features(frame, layouts, include_derived, constants)
     model = XGBRegressor()
     model.load_model(
-        RESULTS_DIR / "models" / f"{feature_set}_n{size_name}_seed{seed}.json"
+        results_dir / "models" / f"{feature_set}_n{size_name}_seed{seed}.json"
     )
     return np.exp(model.predict(values))
 
 
 def _metric_values(y_true, prediction):
-    ranked = np.argsort(prediction, kind="stable")
-    values = {
-        "spearman": spearman(y_true, prediction),
-        "fastest_decile_spearman": fastest_decile_spearman(y_true, prediction),
-        "top_10_recall_in_30": top_k_recall(y_true, prediction, 10, 30),
-    }
-    for k in (1, 5, 10):
-        values[f"top_{k}_latency_ratio"] = top_k_latency_ratio(
-            y_true, ranked, min(k, len(y_true))
-        )
-    return values
+    return ranking_metrics(y_true, prediction)
 
 
 def _bootstrap_metrics(y_true, prediction, seed=0, n_resamples=1000):
@@ -186,6 +188,7 @@ def _paired_comparison(
     hybrid_seed_predictions,
     scopes,
     provenance,
+    results_dir,
 ):
     rows = []
     metric_names = (
@@ -241,7 +244,7 @@ def _paired_comparison(
                     "training_seeds": 5,
                 }
             )
-    write_csv(pd.DataFrame(rows), RESULTS_DIR / "paired_comparison.csv", provenance)
+    write_csv(pd.DataFrame(rows), results_dir / "paired_comparison.csv", provenance)
 
 
 def _t_interval(values):
@@ -257,12 +260,16 @@ def _t_interval(values):
     return mean, mean - margin, mean + margin
 
 
-def _write_feature_comparison(test, layouts, constants, y_true, provenance):
+def _write_feature_comparison(
+    test, layouts, constants, y_true, provenance, results_dir
+):
     rows = []
     for seed in range(5):
-        base = _predict_model_seed(test, layouts, constants, "base", "all", seed)
+        base = _predict_model_seed(
+            test, layouts, constants, "base", "all", seed, results_dir
+        )
         hybrid = _predict_model_seed(
-            test, layouts, constants, "base_analytic", "all", seed
+            test, layouts, constants, "base_analytic", "all", seed, results_dir
         )
         rng = np.random.default_rng(1000 + seed)
         base_rho, hybrid_rho, delta_rho = [], [], []
@@ -309,7 +316,7 @@ def _write_feature_comparison(test, layouts, constants, y_true, provenance):
         )
     write_csv(
         pd.DataFrame(rows),
-        RESULTS_DIR / "feature_comparison_seeds.csv",
+        results_dir / "feature_comparison_seeds.csv",
         provenance,
     )
     summary = []
@@ -335,13 +342,15 @@ def _write_feature_comparison(test, layouts, constants, y_true, provenance):
         )
     write_csv(
         pd.DataFrame(summary),
-        RESULTS_DIR / "feature_comparison_summary.csv",
+        results_dir / "feature_comparison_summary.csv",
         provenance,
     )
 
 
-def _write_shuffled_label_null(train, test, layouts, constants, y_true, scopes, provenance):
-    with (RESULTS_DIR / "training_grid.json").open(encoding="utf-8") as source:
+def _write_shuffled_label_null(
+    train, test, layouts, constants, y_true, scopes, provenance, results_dir
+):
+    with (results_dir / "training_grid.json").open(encoding="utf-8") as source:
         grid = json.load(source)["best"]
 
     raw_rows = []
@@ -428,7 +437,7 @@ def _write_shuffled_label_null(train, test, layouts, constants, y_true, scopes, 
         summary_rows.append(summary)
     write_csv(
         pd.DataFrame(summary_rows),
-        RESULTS_DIR / "shuffled_label_null.csv",
+        results_dir / "shuffled_label_null.csv",
         provenance,
     )
 
@@ -448,7 +457,7 @@ def _write_shuffled_label_null(train, test, layouts, constants, y_true, scopes, 
                     }
                 ]
             ),
-            RESULTS_DIR / "shuffled_label_check.csv",
+            results_dir / "shuffled_label_check.csv",
             provenance,
         )
 
@@ -485,29 +494,41 @@ def _write_shuffled_label_null(train, test, layouts, constants, y_true, scopes, 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    add_target_argument(parser)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
-    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+    target = load_target_config(args.target, ROOT)
+    workload = load_workload_config(root=ROOT)
+    data_dir, results_dir = target.paths(ROOT)
+    provenance = capture_provenance(
+        ROOT,
+        allow_dirty=args.allow_dirty,
+        run_context=experiment_metadata(target, workload, data_dir),
+    )
 
-    frame = load_pool()
-    splits = load_splits()
+    frame = load_pool(data_dir=data_dir)
+    splits = load_splits(data_dir)
     validate_splits(splits, set(frame["id"].astype(int)))
-    layouts = load_layouts()
+    layouts = load_layouts(data_dir, target)
     train_ids = set(int(value) for value in splits["train"])
     test_ids = set(int(value) for value in splits["test"])
     train = frame[frame["id"].astype(int).isin(train_ids)].reset_index(drop=True)
     test = frame[frame["id"].astype(int).isin(test_ids)].reset_index(drop=True)
     if test.empty:
         raise ValueError("The test split contains no modelable measurements")
-    hand_set, fitted = _read_constants()
+    hand_set, fitted = _read_constants(results_dir)
     y_true = test["median_ms"].to_numpy(dtype=float)
 
     base_seed_predictions = [
-        _predict_model_seed(test, layouts, fitted, "base", "all", seed)
+        _predict_model_seed(
+            test, layouts, fitted, "base", "all", seed, results_dir
+        )
         for seed in range(5)
     ]
     hybrid_seed_predictions = [
-        _predict_model_seed(test, layouts, fitted, "base_analytic", "all", seed)
+        _predict_model_seed(
+            test, layouts, fitted, "base_analytic", "all", seed, results_dir
+        )
         for seed in range(5)
     ]
     predictions = {
@@ -532,7 +553,7 @@ def main() -> None:
         "xgb(base)": np.mean(base_seed_predictions, axis=0),
         "xgb(base+analytic)": np.mean(hybrid_seed_predictions, axis=0),
     }
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
     scopes = list(_scope_indices(test))
     score_rows = []
     random_summaries = {}
@@ -566,7 +587,7 @@ def main() -> None:
             )
     write_csv(
         pd.DataFrame(score_rows),
-        RESULTS_DIR / "evaluation.csv",
+        results_dir / "evaluation.csv",
         provenance,
     )
 
@@ -586,6 +607,7 @@ def main() -> None:
         hybrid_seed_predictions,
         scopes,
         provenance,
+        results_dir,
     )
 
     draft_scores = {
@@ -662,7 +684,7 @@ def main() -> None:
                 )
     write_csv(
         pd.DataFrame(draft_rows),
-        RESULTS_DIR / "draft_verify.csv",
+        results_dir / "draft_verify.csv",
         provenance,
     )
 
@@ -702,7 +724,7 @@ def main() -> None:
             )
     write_csv(
         pd.DataFrame(ablation_rows),
-        RESULTS_DIR / "ablations.csv",
+        results_dir / "ablations.csv",
         provenance,
     )
 
@@ -739,7 +761,7 @@ def main() -> None:
                 else float("nan"),
             }
         )
-    write_csv(pd.DataFrame(noise_rows), RESULTS_DIR / "noise_floor.csv", provenance)
+    write_csv(pd.DataFrame(noise_rows), results_dir / "noise_floor.csv", provenance)
 
     learning_rows = []
     for scope, indexes in scopes:
@@ -748,7 +770,13 @@ def main() -> None:
         for size_name, subset_ids in splits["nested_train"].items():
             for seed in range(5):
                 prediction = _predict_model_seed(
-                    scoped_test, layouts, fitted, "base_analytic", size_name, seed
+                    scoped_test,
+                    layouts,
+                    fitted,
+                    "base_analytic",
+                    size_name,
+                    seed,
+                    results_dir,
                 )
                 learning_rows.append(
                     {
@@ -763,7 +791,7 @@ def main() -> None:
                     }
                 )
     learning = pd.DataFrame(learning_rows)
-    write_csv(learning, RESULTS_DIR / "learning_curve.csv", provenance)
+    write_csv(learning, results_dir / "learning_curve.csv", provenance)
     learning_summary = []
     for (scope, train_size, subset), group in learning.groupby(
         ["scope", "train_size", "subset"], sort=False
@@ -787,22 +815,24 @@ def main() -> None:
         )
     write_csv(
         pd.DataFrame(learning_summary),
-        RESULTS_DIR / "learning_curve_summary.csv",
+        results_dir / "learning_curve_summary.csv",
         provenance,
     )
 
-    _write_feature_comparison(test, layouts, fitted, y_true, provenance)
+    _write_feature_comparison(
+        test, layouts, fitted, y_true, provenance, results_dir
+    )
     _write_shuffled_label_null(
-        train, test, layouts, fitted, y_true, scopes, provenance
+        train, test, layouts, fitted, y_true, scopes, provenance, results_dir
     )
 
-    all_data = load_pool(include_failures=True)
+    all_data = load_pool(include_failures=True, data_dir=data_dir)
     write_csv(
         all_data["status"]
         .value_counts()
         .rename_axis("status")
         .reset_index(name="count"),
-        RESULTS_DIR / "failure_rates.csv",
+        results_dir / "failure_rates.csv",
         provenance,
     )
     print(

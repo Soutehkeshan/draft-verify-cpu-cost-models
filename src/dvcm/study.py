@@ -20,10 +20,13 @@ _LEGACY_PARALLEL_TILE_LEVELS = {
 }
 
 
-def load_layouts() -> dict[int, dict[str, Any]]:
-    """Load serializable per-sketch layouts."""
+def load_layouts(
+    data_dir: Path = DATA_DIR,
+    target: Any | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Load per-sketch layouts and bind features to the selected target."""
     layouts = {}
-    for path in sorted(DATA_DIR.glob("layout_*.json")):
+    for path in sorted(data_dir.glob("layout_*.json")):
         sketch_id = int(path.stem.removeprefix("layout_"))
         with path.open(encoding="utf-8") as source:
             layout = json.load(source)
@@ -34,18 +37,32 @@ def load_layouts() -> dict[int, dict[str, Any]]:
                 raise ValueError(
                     f"Legacy layout {path} lacks parallel-loop metadata"
                 ) from error
-        layout.setdefault("vector_registers", 32)
+        if target is not None:
+            target_fields = {
+                "vector_lanes": target.simd_width_f32,
+                "num_cores": target.num_cores,
+                "vector_registers": target.vector_registers,
+            }
+            for name, value in target_fields.items():
+                if value is None:
+                    layout.pop(name, None)
+                else:
+                    layout[name] = int(value)
         layouts[sketch_id] = layout
     if not layouts:
-        raise FileNotFoundError(f"No layout_*.json files found in {DATA_DIR}")
+        raise FileNotFoundError(f"No layout_*.json files found in {data_dir}")
     return layouts
 
 
-def load_pool(include_failures: bool = False) -> pd.DataFrame:
+def load_pool(
+    include_failures: bool = False,
+    data_dir: Path = DATA_DIR,
+) -> pd.DataFrame:
     """Read the measured pool, retaining only modelable rows by default."""
-    if not POOL_PATH.exists():
-        raise FileNotFoundError(f"Measured data not found: {POOL_PATH}; run make data")
-    frame = pd.read_parquet(POOL_PATH)
+    pool_path = data_dir / "pool.parquet"
+    if not pool_path.exists():
+        raise FileNotFoundError(f"Measured data not found: {pool_path}; run make data")
+    frame = pd.read_parquet(pool_path)
     if not include_failures:
         frame = frame[
             frame["status"].isin(("ok", "slow_skip"))
@@ -56,12 +73,15 @@ def load_pool(include_failures: bool = False) -> pd.DataFrame:
 
 
 def positions_and_features(
-    frame: pd.DataFrame, include_derived: bool = True
+    frame: pd.DataFrame,
+    include_derived: bool = True,
+    data_dir: Path = DATA_DIR,
+    target: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert table records to encoded position and feature matrices."""
     from dvcm.features import features
 
-    layouts = load_layouts()
+    layouts = load_layouts(data_dir, target)
     positions = np.asarray([np.asarray(row, dtype=float) for row in frame["vector"]])
     matrix = np.asarray(
         [
@@ -73,13 +93,44 @@ def positions_and_features(
     return positions, matrix
 
 
-def load_splits() -> dict[str, Any]:
-    """Load deterministic schedule-ID splits."""
-    path = DATA_DIR / "splits.json"
+def load_splits(data_dir: Path = DATA_DIR) -> dict[str, Any]:
+    """Load deterministic schedule-ID splits from a selected dataset."""
+    path = data_dir / "splits.json"
     if not path.exists():
         raise FileNotFoundError(f"Split file not found: {path}; run make models")
     with path.open(encoding="utf-8") as source:
         return json.load(source)
+
+
+def make_splits(frame: pd.DataFrame, seed: int = 0) -> dict[str, Any]:
+    """Create reproducible per-sketch 70/15/15 splits and nested TRAIN subsets."""
+    rng = np.random.default_rng(seed)
+    train: list[int] = []
+    validation: list[int] = []
+    test: list[int] = []
+    for _, group in frame.groupby("sketch_id", sort=True):
+        ids = group["id"].astype(int).to_numpy()
+        rng.shuffle(ids)
+        n_train = int(len(ids) * 0.70)
+        n_validation = int(len(ids) * 0.15)
+        train.extend(ids[:n_train].tolist())
+        validation.extend(ids[n_train : n_train + n_validation].tolist())
+        test.extend(ids[n_train + n_validation :].tolist())
+
+    subset_order = np.asarray(train, dtype=int)
+    rng.shuffle(subset_order)
+    nested = {
+        str(size): subset_order[: min(size, len(subset_order))].tolist()
+        for size in (100, 250, 500, 1000, 2000)
+    }
+    nested["all"] = subset_order.tolist()
+    return {
+        "seed": seed,
+        "train": sorted(train),
+        "validation": sorted(validation),
+        "test": sorted(test),
+        "nested_train": nested,
+    }
 
 
 def validate_splits(splits: dict[str, Any], sample_ids: set[int]) -> None:

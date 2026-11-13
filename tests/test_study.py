@@ -1,6 +1,10 @@
-import pytest
+import json
 
-from dvcm.study import validate_splits
+import pytest
+import pandas as pd
+
+from dvcm.config import load_target_config
+from dvcm.study import load_layouts, make_splits, validate_splits
 
 
 def test_split_validation_requires_disjoint_exhaustive_partitions():
@@ -26,3 +30,42 @@ def test_split_validation_rejects_non_nested_training_subsets():
     }
     with pytest.raises(ValueError, match="not nested"):
         validate_splits(splits, {1, 2, 3, 4, 5})
+
+
+def test_split_generation_is_seeded_stratified_and_disjoint():
+    frame = pd.DataFrame(
+        [
+            {"id": sketch * 20 + index, "sketch_id": sketch}
+            for sketch in range(3)
+            for index in range(20)
+        ]
+    )
+
+    splits = make_splits(frame, seed=0)
+
+    assert splits == make_splits(frame, seed=0)
+    validate_splits(splits, set(frame["id"]))
+    for partition in ("train", "validation", "test"):
+        counts = frame[frame["id"].isin(splits[partition])].groupby("sketch_id").size()
+        assert counts.nunique() == 1
+
+
+def test_target_binding_does_not_reuse_legacy_layout_hardware_values(tmp_path):
+    layout = {
+        "dim": 11,
+        "tiles": [],
+        "categoricals": [],
+        "parallel_tile_levels": {"i": 2, "j": 2},
+        "vector_lanes": 4,
+        "num_cores": 4,
+        "vector_registers": 32,
+    }
+    (tmp_path / "layout_0.json").write_text(json.dumps(layout))
+
+    nano_layout = load_layouts(
+        tmp_path, load_target_config("jetson_nano")
+    )[0]
+
+    assert nano_layout["num_cores"] == 4
+    assert "vector_lanes" not in nano_layout
+    assert "vector_registers" not in nano_layout

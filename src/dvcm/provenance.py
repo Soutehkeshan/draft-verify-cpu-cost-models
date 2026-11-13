@@ -13,6 +13,7 @@ def capture_provenance(
     repository_root: Path,
     *,
     allow_dirty: bool = False,
+    run_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -36,13 +37,16 @@ def capture_provenance(
 
     import tvm
 
-    return {
+    provenance = {
         "git_commit": commit,
         "git_dirty": dirty,
         "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "tvm_version": str(tvm.__version__),
         "python_version": platform.python_version(),
     }
+    if run_context is not None:
+        provenance["run_context"] = run_context
+    return provenance
 
 
 def write_json(path: Path, payload: dict[str, Any], provenance: dict[str, Any]) -> None:

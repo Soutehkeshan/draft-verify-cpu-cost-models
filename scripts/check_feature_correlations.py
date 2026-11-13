@@ -14,8 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.features import ALL_DERIVED_NAMES, DERIVED_NAMES, derived
+from dvcm.config import (
+    add_target_argument,
+    experiment_metadata,
+    load_target_config,
+    load_workload_config,
+)
 from dvcm.provenance import capture_provenance, write_csv
-from dvcm.study import DATA_DIR, RESULTS_DIR, load_layouts, load_pool, load_splits
+from dvcm.study import load_layouts, load_pool, load_splits
 
 EXPECTED_SIGNS = {
     "bytes_moved": 1,
@@ -28,28 +34,38 @@ FLAT_RHO_THRESHOLD = 0.02
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    add_target_argument(parser)
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
-    provenance = capture_provenance(ROOT, allow_dirty=args.allow_dirty)
+    target = load_target_config(args.target, ROOT)
+    workload = load_workload_config(root=ROOT)
+    data_dir, results_dir = target.paths(ROOT)
+    provenance = capture_provenance(
+        ROOT,
+        allow_dirty=args.allow_dirty,
+        run_context=experiment_metadata(target, workload, data_dir),
+    )
 
-    metadata_path = DATA_DIR / "run_meta.json"
+    metadata_path = data_dir / "run_meta.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Collection metadata not found: {metadata_path}")
     import json
 
     with metadata_path.open(encoding="utf-8") as source:
         metadata = json.load(source)
+    if metadata.get("target_id", target.target_id) != target.target_id:
+        raise ValueError("Selected target does not match the collected dataset")
     if not metadata.get("collection_complete", False):
         raise RuntimeError("Feature correlations require a completed collection")
 
-    frame = load_pool()
-    splits = load_splits()
+    frame = load_pool(data_dir=data_dir)
+    splits = load_splits(data_dir)
     train_ids = {int(value) for value in splits["train"]}
     train = frame[frame["id"].astype(int).isin(train_ids)]
     if train.empty:
         raise ValueError("The TRAIN split has no modelable measurements")
 
-    layouts = load_layouts()
+    layouts = load_layouts(data_dir, target)
     values_by_name = {name: [] for name in ALL_DERIVED_NAMES}
     for row in train.itertuples(index=False):
         position = np.asarray(row.vector, dtype=float)
@@ -76,6 +92,7 @@ def main() -> None:
                 status = "rethink"
         results.append(
             {
+                "target_id": target.target_id,
                 "feature": name,
                 "train_rows": len(train),
                 "unique_values": unique_values,
@@ -91,8 +108,8 @@ def main() -> None:
             }
         )
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = RESULTS_DIR / "feature_correlations.csv"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    output_path = results_dir / "feature_correlations.csv"
     write_csv(pd.DataFrame(results), output_path, provenance)
     print(f"TRAIN-only Spearman correlations ({len(train)} rows):")
     for result in results:

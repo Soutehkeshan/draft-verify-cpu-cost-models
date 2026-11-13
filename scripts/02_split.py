@@ -3,52 +3,54 @@
 """Create deterministic stratified train/validation/test schedule splits."""
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
-
-import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dvcm.study import DATA_DIR, load_pool, save_json, validate_splits
+from dvcm.config import (
+    add_target_argument,
+    experiment_metadata,
+    load_target_config,
+    load_workload_config,
+)
+from dvcm.study import load_pool, load_splits, make_splits, save_json, validate_splits
 
 
 def main() -> None:
-    frame = load_pool()
-    rng = np.random.default_rng(0)
-    train: list[int] = []
-    validation: list[int] = []
-    test: list[int] = []
-    for _, group in frame.groupby("sketch_id", sort=True):
-        ids = group["id"].astype(int).to_numpy()
-        rng.shuffle(ids)
-        n_train = int(len(ids) * 0.70)
-        n_validation = int(len(ids) * 0.15)
-        train.extend(ids[:n_train].tolist())
-        validation.extend(ids[n_train : n_train + n_validation].tolist())
-        test.extend(ids[n_train + n_validation :].tolist())
-
-    subset_order = np.asarray(train, dtype=int)
-    rng.shuffle(subset_order)
-    sizes = [100, 250, 500, 1000, 2000]
-    nested = {
-        str(size): subset_order[: min(size, len(subset_order))].tolist()
-        for size in sizes
-    }
-    nested["all"] = subset_order.tolist()
-    splits = {
-        "seed": 0,
-        "train": sorted(train),
-        "validation": sorted(validation),
-        "test": sorted(test),
-        "nested_train": nested,
-    }
+    parser = argparse.ArgumentParser()
+    add_target_argument(parser)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+    target = load_target_config(args.target, ROOT)
+    workload = load_workload_config(root=ROOT)
+    data_dir, _ = target.paths(ROOT)
+    frame = load_pool(data_dir=data_dir)
+    split_path = data_dir / "splits.json"
+    if split_path.exists() and not args.force:
+        existing = load_splits(data_dir)
+        validate_splits(existing, set(frame["id"].astype(int)))
+        if existing.get("target_id", target.target_id) != target.target_id:
+            raise ValueError("Existing split belongs to a different target")
+        print(f"Preserving existing split: {split_path}")
+        return
+    splits = make_splits(frame, seed=workload.seed)
     validate_splits(splits, set(frame["id"].astype(int)))
-    save_json(DATA_DIR / "splits.json", splits)
+    context = experiment_metadata(target, workload, data_dir)
+    splits.update(
+        {
+            "target_id": target.target_id,
+            "workload_id": workload.workload_id,
+            "pool_sha256": context["dataset"].get("pool.parquet_sha256"),
+        }
+    )
+    save_json(split_path, splits)
     print(
         f"Split {len(frame)} valid samples: "
-        f"train={len(train)}, validation={len(validation)}, test={len(test)}"
+        f"train={len(splits['train'])}, validation={len(splits['validation'])}, "
+        f"test={len(splits['test'])}"
     )
 
 

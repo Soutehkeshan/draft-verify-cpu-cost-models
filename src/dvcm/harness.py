@@ -1,7 +1,7 @@
 """Compile and measure individual MetaSchedule traces."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 import logging
 import time
@@ -17,17 +17,14 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class HarnessConfig:
-    n: int = 512
-    target: Any = field(
-        default_factory=lambda: tvm.target.Target(
-            {"kind": "llvm", "mcpu": "apple-m2", "num-cores": 4}
-        )
-    )
-    repeats: int = 5
-    number: int = 1
-    min_repeat_ms: int = 10
-    seed: int = 0
-    slow_threshold_ms: float = 1000.0
+    target: Any
+    postprocessors: str
+    n: int
+    repeats: int
+    number: int
+    min_repeat_ms: int
+    seed: int
+    slow_threshold_ms: float
 
     def __post_init__(self) -> None:
         if self.n < 1:
@@ -137,9 +134,11 @@ def _schedule_from_position(
         raise ValueError("design_space_trace must be a MetaSchedule Schedule")
     schedule = tvm.s_tir.Schedule(make_matmul(config.n), seed=max(1, config.seed))
     trace.apply_to_schedule(schedule, remove_postproc=False)
-    for postproc in ms.Postproc.create("llvm"):
+    for postproc in ms.Postproc.create(config.postprocessors):
         if not postproc.apply(schedule):
-            raise ValueError(f"LLVM postprocessor rejected schedule: {postproc}")
+            raise ValueError(
+                f"{config.postprocessors} postprocessor rejected schedule: {postproc}"
+            )
     return schedule
 
 

@@ -1,5 +1,6 @@
 import numpy as np
 
+from dvcm.config import LEGACY_TARGET, load_target_config
 from dvcm.analytic import AnalyticConstants, Penalties, latency_seconds, penalty_terms
 from dvcm.features import (
     ALL_DERIVED_NAMES,
@@ -31,6 +32,12 @@ def _positions():
     tiny_tile = np.array([9, 0, 0, 0, 9, 0, 0, 0, 9, 0, 0])
     large_tile = np.array([0, 0, 3, 6, 0, 0, 3, 6, 3, 6, 2])
     return tiny_tile, large_tile
+
+
+def _m2_constants(**overrides):
+    values = load_target_config(LEGACY_TARGET).analytic_constants()
+    values.update(overrides)
+    return AnalyticConstants(**values)
 
 
 def test_flops_and_bytes_are_correct_for_tiny_and_large_tiles():
@@ -84,8 +91,9 @@ def test_utilization_and_penalty_terms_are_bounded():
     assert tiny["register_utilisation"] == 1.0
     assert large["register_utilisation"] == 0.03125
 
+    constants = _m2_constants()
     for position in (tiny_tile, large_tile):
-        factors = penalty_terms(position, layout)
+        factors = penalty_terms(position, layout, constants)
         assert set(factors) == {
             "vector",
             "parallel",
@@ -95,21 +103,21 @@ def test_utilization_and_penalty_terms_are_bounded():
         }
         assert np.isfinite(list(factors.values())).all()
         assert all(0.0 <= value <= 1.0 for value in factors.values())
-        assert np.isfinite(latency_seconds(position, layout))
+        assert np.isfinite(latency_seconds(position, layout, constants))
 
-    ordinary = penalty_terms(tiny_tile, layout)
+    ordinary = penalty_terms(tiny_tile, layout, constants)
     assert all(ordinary[name] == 1.0 for name in ("cache_l1", "cache_l2"))
     constrained = penalty_terms(
         tiny_tile,
         layout,
-        AnalyticConstants(l1_bytes=1, l2_bytes=1),
+        _m2_constants(l1_bytes=1, l2_bytes=1),
     )
     assert all(constrained[name] < 1.0 for name in ("cache_l1", "cache_l2"))
 
     disabled = penalty_terms(
         large_tile,
         layout,
-        AnalyticConstants(),
+        constants,
         penalties=Penalties(
             vector=False, parallel=False, cache=False, register=False
         ),
@@ -120,7 +128,7 @@ def test_utilization_and_penalty_terms_are_bounded():
 def test_latency_is_compute_plus_memory_work_over_effective_peak():
     layout = _layout()
     tiny_tile, _ = _positions()
-    constants = AnalyticConstants()
+    constants = _m2_constants()
     descriptors = derived(tiny_tile, layout)
     factors = penalty_terms(tiny_tile, layout, constants)
     expected = descriptors["flop_count"] / (
