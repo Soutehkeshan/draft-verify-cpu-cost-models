@@ -14,8 +14,7 @@ scheduling are out of scope.
 
 ## Current status
 
-**RPC PROOF OF CONCEPT AND BOUNDED SCHEDULE QUALIFICATION COMPLETE — FULL
-COLLECTION NOT ENABLED**
+**NANO RPC QUALIFICATION COMPLETE — FULL COLLECTION NOT ENABLED**
 
 The M2 successfully cross-compiled and exported AArch64 CPU code for
 `aarch64-linux-gnu` / `cortex-a57`, then loaded and executed it on the Nano
@@ -30,16 +29,19 @@ checked 48 deterministic candidates across all three generated sketches (16
 per sketch); all 48 passed the harness's NumPy correctness check. Three
 separate seven-repeat timing batches were also run for each sketch's recorded
 default schedule. Batch medians were consistent, but two of the three sketches
-had isolated repeats more than 10% above their combined median. No CPU
-frequency or temperature trace was captured, so the cause and collection-grade
-timing stability are not established.
+had isolated repeats more than 10% above their combined median. That bounded
+check captured no frequency or temperature data; the later noise canary
+(see "Nano qualification") records both before and after every timed round.
 
 This is a small validation sample, not proof that all 3,704,400 encoded
-positions are valid or reliable. The Nano profile's schedule rules and
-postprocessors therefore remain unset, and the collection command continues
-to refuse to run pending broader review and timing-stability validation.
-SIMD/cache/register model values, peak compute, and memory bandwidth remain
-unset.
+positions are valid or reliable. A broader qualification (layout parity, loop
+order, a 150-schedule stratified replay pilot, and a 20-schedule noise canary)
+is described under "Nano qualification" below; its outputs are in
+`data/nano/`. The Nano profile's schedule rules and postprocessors remain
+unset, so the collection command still refuses to run until that gate is
+explicitly opened. SIMD width, cache sizes, and register count are set from
+the Nano's own sysfs, `lscpu`, and ISA information; peak compute and memory
+bandwidth are initial guesses that the analytical fit refines on TRAIN only.
 
 The prior Apple M2 data release and its results are retained as historical,
 M2-only material. They are not Jetson measurements and are not presented as
@@ -120,9 +122,17 @@ another target.
   correctness checking, and timing for an explicitly selected TVM target.
 - `src/dvcm/study.py`: dataset loading, split validation, and deterministic
   split generation.
+- `src/dvcm/rpc.py`: TVM RPC session, module export/upload/link timing, and
+  remote inputs.
+- `src/dvcm/device_state.py` and `scripts/nano_device_state.py`: read-only Nano
+  clock, frequency-residency, thermal, power-mode, and load snapshots.
+- `src/dvcm/telemetry.py` and `scripts/nano_telemetry.py`: the Nano thread
+  sampler used by the threading and sampler-overhead checks.
 - `scripts/`: collection, splitting, fitting, training, evaluation, and plots.
 - `scripts/validate_nano_schedules.py`: bounded RPC schedule qualification;
   prints validation metadata and results without writing a dataset.
+- `scripts/qualify_nano.py`: Nano qualification steps (see below);
+  `scripts/nano_fma_peak.c`: NEON FMA throughput check.
 - `tests/`: synthetic unit tests plus host TVM schedule/build smoke tests.
 
 The harness takes a target and postprocessor configuration rather than
@@ -152,7 +162,7 @@ outputs. CSV outputs have metadata companions; JSON outputs record provenance.
 
 Target paths prevent new Nano artifacts from mixing with the historical M2
 pool: the M2 compatibility profile reads the existing `data/` pool and writes
-new results to `results/apple_m2/`; the Nano profile reserves `data/jetson_nano/`
+new results to `results/apple_m2/`; the Nano profile reserves `data/nano/`
 and `results/jetson_nano/`. Existing M2 result artifacts in the root
 `results/` are left untouched. Generated data and results remain ignored by
 Git. The released M2 dataset is available at
@@ -308,6 +318,44 @@ and listens only on localhost. Keep the SSH tunnel open while running tests.
 The RPC server permits remote code execution and file writes; do not expose it
 on an untrusted network.
 
+## Nano qualification
+
+`scripts/qualify_nano.py` runs the qualification steps without collecting a
+dataset. It only reads the M2 data in `data/` and writes to `data/nano/`
+(`run_meta.json`, `pilot_report.json`, `canary.json`, `layout_*.json`, and
+`qualification/`). The RPC server runs with the fixed configuration recorded
+in `data/nano/run_meta.json`. No telemetry sampler runs during timing; the
+read-only `scripts/nano_device_state.py` probe records clocks, frequency
+residency, temperatures, cooling states, `nvpmodel`, and load before and after
+each timed block.
+
+```sh
+PYTHONPATH=src python scripts/qualify_nano.py parity        # layout/design-space parity vs M2
+PYTHONPATH=src python scripts/qualify_nano.py loop-order    # SSRSRS order in scheduled TIR
+PYTHONPATH=src python scripts/qualify_nano.py replay --ssh-target arad@jetson-nano.local
+PYTHONPATH=src python scripts/qualify_nano.py noise --ssh-target arad@jetson-nano.local
+PYTHONPATH=src python scripts/qualify_nano.py throughput
+PYTHONPATH=src python scripts/qualify_nano.py features
+```
+
+`replay` rebuilds 150 M2-pool schedules (stratified by sketch and M2 latency
+decile, fixed seed, no resampling) on the Nano target, checks NumPy
+correctness, times them with the M2 protocol, and records
+`slow_threshold_ms` (20 x pilot median) in `data/nano/run_meta.json`.
+
+The Nano collection path (written, gated, not yet run) re-measures the M2
+pool's positions in `test_first` order: TEST ids from `data/splits.json`, the
+nested TRAIN subsets in their existing order, then VALIDATION. It checkpoints
+per batch, resumes, retries once after an RPC drop (`rpc_error` otherwise), and
+refuses to run without the pilot threshold, the pilot report, the qualified
+canaries, a clean worktree (or `--allow-dirty`), or an open collection gate:
+
+```sh
+PYTHONPATH=src python scripts/01_collect.py --target jetson_nano \
+  --rpc-host 127.0.0.1 --rpc-port 9090 --positions-from data/pool.parquet \
+  --order test_first --ssh-target arad@jetson-nano.local [--n 752]
+```
+
 ## What is tested and what remains
 
 **Tested locally:** profile loading and validation; target-bound feature
@@ -326,42 +374,46 @@ isolated high repeats on two sketches. macOS archive export must suppress
 AppleDouble metadata (`COPYFILE_DISABLE=1`) so the Nano linker receives only
 the object files. The optional collector keeps schedule build, archive export,
 module upload, remote link/load, and kernel timing distinct; initial input
-generation and transfer are recorded once in run metadata.
+generation and transfer are recorded once in run metadata. The qualification
+added: design-space and loop-order parity with the M2 collection; 150
+replayed M2-pool schedules, all correct and timed with the M2 protocol; a
+20-schedule canary over five rounds and a second RPC session; and a NEON FMA
+peak check.
 
 **Existing M2 evidence:** the released M2 dataset and historical M2 result
 artifacts. These are not re-labeled or reinterpreted as Nano measurements.
 
-**Awaiting further Nano validation:** exhaustive or broader schedule-space
-reliability, frequency/temperature monitoring and timing-noise investigation,
-cache/SIMD/register assumptions, training-calibrated compute/bandwidth
-constants, and actual Nano collection, training, and test evaluation. No Nano
-dataset or model-evaluation results are reported; the qualification timings
-are diagnostic only.
+**Awaiting:** schedule-space reliability beyond the 198 qualified positions,
+TRAIN-calibrated compute/bandwidth constants, and the Nano collection,
+training, and TEST evaluation. No Nano dataset or model-evaluation results are
+reported; the qualification timings are diagnostic only.
 
 ## Handoff: Nano-specific work
 
-The RPC path is a proof of concept only. The remaining work is:
-
-1. Record the Nano OS, architecture, GCC/Python versions, and isolated TVM
-   wheel/runtime versions for provenance. The Nano does not need an LLVM
-   compiler for the cross-compilation workflow.
-2. The target object `aarch64-linux-gnu` / `cortex-a57` and LLVM schedule rules
-   and postprocessors passed a bounded 48-candidate check. The full search
-   space is not qualified; validate it more broadly and resolve timing noise
-   before populating schedule fields in `configs/hardware/jetson_nano.json`.
-3. Verify SIMD width, cache sizes, and any register assumptions from
-   authoritative system or architecture information. Do not copy M2 values.
+1. The Nano OS, kernel, L4T, GCC, Python, and TVM versions and the fixed RPC
+   server command and environment are recorded in `data/nano/run_meta.json`.
+   The Nano does not need an LLVM compiler for the cross-compilation workflow.
+2. The target `aarch64-linux-gnu` / `cortex-a57` with explicit `llvm` schedule
+   rules and postprocessors has design-space and loop-order parity with the M2
+   collection and passed the 150-schedule replay pilot and noise canary. The
+   schedule fields in `configs/hardware/jetson_nano.json` stay unset until the
+   collection gate is opened deliberately.
+3. SIMD width, cache sizes, and register count are set in
+   `configs/hardware/jetson_nano.json` with their sources in its `notes`;
+   peak compute and bandwidth there are initial guesses, fitted on TRAIN only.
 4. Continue using the isolated Python 3.10 RPC environment; do not modify
    system Python, CUDA, JetPack, drivers, or system packages.
-5. After schedule configuration and profiling are approved, run a small
-   measured pilot. Only after those checks should full collection and
-   evaluation begin.
+5. Collect with the Nano collection path (see "Nano qualification"), then
+   split, train, and evaluate on the shared TEST set.
 
 ## Limitations and references
 
 The RPC path uses the repository's existing TVM MetaSchedule implementation
-and version. Only a small sample of the generated positions has been validated
-on the Nano; the candidate space is much larger. Analytical features are
+and version. Only 198 of the 3,704,400 encoded positions (48 bounded
+candidates and 150 replayed M2-pool schedules) have been validated on the
+Nano before collection. CPU clocks are not pinned (`schedutil` governor;
+`jetson_clocks` and the memory clock need root and were not read), and some
+schedules shift by a few percent between RPC sessions. Analytical features are
 estimates and omit hardware counters. The current workload is only one FP32
 matrix size. Timing quality depends on device power, thermal, and scheduling
 conditions.
