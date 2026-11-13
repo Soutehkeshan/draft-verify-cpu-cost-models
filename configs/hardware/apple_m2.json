@@ -1,0 +1,41 @@
+{
+  "target_id": "apple_m2",
+  "name": "MacBook Air Apple M2",
+  "primary": false,
+  "architecture": "arm64",
+  "cpu": "Apple M2",
+  "num_cores": 4,
+  "simd_width_f32": 4,
+  "l1_data_cache_bytes": 131072,
+  "l2_cache_bytes": 16777216,
+  "vector_registers": 32,
+  "peak_flops": 400000000000.0,
+  "bandwidth_bytes_s": 100000000000.0,
+  "compiler_target": {
+    "kind": "llvm",
+    "mcpu": "apple-m2",
+    "num-cores": 4
+  },
+  "compiler_version": null,
+  "compiler_options": [
+    "-mcpu=apple-m2",
+    "-num-cores=4"
+  ],
+  "schedule_rules": "llvm",
+  "postprocessors": "llvm",
+  "thread_settings": {
+    "TVM_NUM_THREADS": 4
+  },
+  "data_dir": "data",
+  "results_dir": "results/apple_m2",
+  "environment": {
+    "os": "macOS",
+    "version": null
+  },
+  "notes": {
+    "peak_flops": "Legacy analytical-model fitting start value; not a measured peak.",
+    "bandwidth_bytes_s": "Legacy nominal starting assumption; not a bandwidth measurement.",
+    "cache": "Legacy values recorded for the M2 study host.",
+    "compiler_version": "The exact LLVM version used by TVM was not recorded."
+  }
+}

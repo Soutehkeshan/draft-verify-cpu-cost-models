@@ -1,0 +1,14 @@
+{
+  "workload_id": "matmul_fp32_512",
+  "operation": "matrix_multiplication",
+  "m": 512,
+  "n": 512,
+  "k": 512,
+  "dtype": "float32",
+  "seed": 0,
+  "measurement": {
+    "repeats": 5,
+    "number": 1,
+    "min_repeat_ms": 10
+  }
+}
