@@ -112,13 +112,13 @@ def penalty_terms(
     return _penalty_terms_from_descriptors(descriptors, constants, penalties)
 
 
-def latency_seconds(
+def latency_components(
     position: np.ndarray,
     layout: dict[str, Any],
     constants: AnalyticConstants,
     penalties: Penalties = Penalties(),
-) -> float:
-    """Estimate Pruner-style additive compute and memory time in seconds."""
+) -> dict[str, float]:
+    """Return the compute and memory terms of latency_seconds() and their penalty factors."""
     descriptors = derived(
         position,
         {
@@ -139,7 +139,24 @@ def latency_seconds(
     memory_time = descriptors["bytes_moved"] / (
         constants.bandwidth_bytes_s * memory_penalty
     )
-    return float(compute_time + memory_time)
+    return {
+        "compute_time_s": compute_time,
+        "memory_time_s": memory_time,
+        "compute_penalty": compute_penalty,
+        "memory_penalty": memory_penalty,
+        **{f"penalty_{name}": value for name, value in factors.items()},
+    }
+
+
+def latency_seconds(
+    position: np.ndarray,
+    layout: dict[str, Any],
+    constants: AnalyticConstants,
+    penalties: Penalties = Penalties(),
+) -> float:
+    """Estimate Pruner-style additive compute and memory time in seconds."""
+    parts = latency_components(position, layout, constants, penalties)
+    return float(parts["compute_time_s"] + parts["memory_time_s"])
 
 
 def fit_constants(

@@ -1,6 +1,13 @@
 import numpy as np
+import pytest
 
-from dvcm.analytic import AnalyticConstants, fit_constants, latency_seconds
+from dvcm.analytic import (
+    AnalyticConstants,
+    Penalties,
+    fit_constants,
+    latency_components,
+    latency_seconds,
+)
 from dvcm.config import LEGACY_TARGET, load_target_config
 from dvcm.learned import predict_latency, train_xgb
 
@@ -97,3 +104,33 @@ def test_xgboost_training_returns_positive_latency_predictions():
     assert predictions.shape == (4,)
     assert np.isfinite(predictions).all()
     assert np.all(predictions > 0)
+
+
+# latency_seconds values of these positions with the Nano profile constants,
+# recorded before latency_components() existed; the split must not change them.
+NANO_LATENCY_S = (0.13016628273157538, 0.006379599482893848, 0.7448661354104125,
+                  0.006615529082893847, 0.047261922263150784)
+NANO_LATENCY_NO_CACHE_S = (0.13016628273157538, 0.005986383482893848, 0.7263063402104125,
+                           0.006615529082893847, 0.047261922263150784)
+
+
+def test_latency_components_split_the_unchanged_analytic_latency():
+    layout = _layout()
+    constants = AnalyticConstants(**load_target_config("jetson_nano").analytic_constants())
+    for position, expected, expected_no_cache in zip(
+        _positions(), NANO_LATENCY_S, NANO_LATENCY_NO_CACHE_S
+    ):
+        parts = latency_components(position, layout, constants)
+        assert latency_seconds(position, layout, constants) == expected
+        assert latency_seconds(position, layout, constants, Penalties(cache=False)) == expected_no_cache
+        assert parts["compute_time_s"] + parts["memory_time_s"] == expected
+        assert parts["compute_penalty"] == (
+            parts["penalty_vector"] * parts["penalty_parallel"] * parts["penalty_register"]
+        )
+        assert parts["memory_penalty"] == parts["penalty_cache_l1"] * parts["penalty_cache_l2"]
+        no_cache = latency_components(position, layout, constants, Penalties(cache=False))
+        assert no_cache["compute_time_s"] == parts["compute_time_s"]
+        assert no_cache["memory_penalty"] == 1.0
+        assert no_cache["memory_time_s"] == pytest.approx(
+            parts["memory_time_s"] * parts["memory_penalty"], rel=1e-12
+        )
