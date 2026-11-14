@@ -140,6 +140,15 @@ def test_split_half_uses_the_first_half_and_the_remaining_repeats():
         split_half([1.0])
 
 
+def test_interleaved_split_half_alternates_odd_and_even_repeats():
+    first, second = split_half([1.0, 3.0, 10.0, 20.0, 30.0], interleaved=True)  # 1,3,5 vs 2,4
+    assert (first, second) == (10.0, 11.5)
+    first, second = split_half(list(range(15)), interleaved=True)  # 8 odd vs 7 even
+    assert (first, second) == (7.0, 7.0)
+    with pytest.raises(ValueError):
+        split_half([1.0], interleaved=True)
+
+
 def test_value_distribution_reports_unpenalised_share_and_distinct_values():
     summary = value_distribution([1.0, 1.0, 0.5, 0.25])
     assert summary["n"] == 4 and summary["n_unique"] == 3

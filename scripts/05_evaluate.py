@@ -610,6 +610,9 @@ def _ceiling(reliability):
 def _noise_row(scope, frame, median_column, repeats_column):
     """Repeat-half agreement of one timing table and its Spearman-Brown full-length estimate.
 
+    The ordered split compares the first half of each schedule's repeats with
+    the rest; the interleaved split compares odd- with even-numbered repeats,
+    which a trend along the repeat sequence (such as warm-up) does not separate.
     The fastest decile is the fastest 10% by the table's own median.
     """
     pairs = []
@@ -617,21 +620,24 @@ def _noise_row(scope, frame, median_column, repeats_column):
     for median, repeats in zip(frame[median_column], frame[repeats_column]):
         times = np.asarray(repeats, dtype=float)
         if times.size >= 2:
-            first, second = split_half(times)
-            pairs.append((float(median), first, second))
+            pairs.append(
+                (float(median), *split_half(times), *split_half(times, interleaved=True))
+            )
             repeat_counts[times.size] += 1
     pairs.sort(key=lambda item: item[0])
-    first = np.asarray([item[1] for item in pairs])
-    second = np.asarray([item[2] for item in pairs])
+    halves = np.asarray([item[1:] for item in pairs], dtype=float).reshape(-1, 4)
     decile_n = max(2, int(np.ceil(len(pairs) * 0.1))) if len(pairs) >= 2 else len(pairs)
-    whole = float(spearmanr(first, second).statistic) if len(pairs) > 1 else float("nan")
-    decile = (
-        float(spearmanr(first[:decile_n], second[:decile_n]).statistic)
-        if decile_n > 1
-        else float("nan")
-    )
+
+    def agreement(first, second):
+        return float(spearmanr(first, second).statistic) if len(first) > 1 else float("nan")
+
+    whole = agreement(halves[:, 0], halves[:, 1])
+    decile = agreement(halves[:decile_n, 0], halves[:decile_n, 1])
+    interleaved_whole = agreement(halves[:, 2], halves[:, 3])
+    interleaved_decile = agreement(halves[:decile_n, 2], halves[:decile_n, 3])
     repeats = repeat_counts.most_common(1)[0][0] if repeat_counts else 0
     half = repeats // 2
+    ordered_ratio = halves[:, 0] / halves[:, 1]
     row = {
         "scope": scope,
         "repeat_half_spearman": whole,
@@ -647,6 +653,19 @@ def _noise_row(scope, frame, median_column, repeats_column):
     row["noise_ceiling_sqrt_spearman_brown"] = _ceiling(row["repeat_half_spearman_brown"])
     row["top_decile_noise_ceiling_sqrt_spearman_brown"] = _ceiling(
         row["top_decile_repeat_half_spearman_brown"]
+    )
+    row["interleaved_split"] = "median of odd- vs even-numbered repeats" if repeats else "n/a"
+    for prefix, rho in (("", interleaved_whole), ("top_decile_", interleaved_decile)):
+        row[f"{prefix}interleaved_repeat_half_spearman"] = rho
+        row[f"{prefix}interleaved_repeat_half_spearman_brown"] = spearman_brown(rho)
+        row[f"{prefix}interleaved_noise_ceiling_sqrt_spearman_brown"] = _ceiling(
+            spearman_brown(rho)
+        )
+    row["first_half_over_rest_median_ratio"] = (
+        float(np.median(ordered_ratio)) if len(pairs) else float("nan")
+    )
+    row["share_first_half_slower"] = (
+        float(np.mean(ordered_ratio > 1.0)) if len(pairs) else float("nan")
     )
     return row
 
@@ -832,6 +851,25 @@ def _write_retime_outputs(test, data_dir, predictions, provenance, results_dir):
                     first_noise["top_decile_repeat_half_spearman_brown"]
                     * again_noise["top_decile_repeat_half_spearman_brown"]
                 ),
+                **{
+                    f"{prefix}{name}": value
+                    for prefix, name, value in (
+                        ("original_", "interleaved_repeat_half_spearman_brown",
+                         first_noise["interleaved_repeat_half_spearman_brown"]),
+                        ("retimed_", "interleaved_repeat_half_spearman_brown",
+                         again_noise["interleaved_repeat_half_spearman_brown"]),
+                        ("", "expected_spearman_if_only_repeat_noise_interleaved", _ceiling(
+                            first_noise["interleaved_repeat_half_spearman_brown"]
+                            * again_noise["interleaved_repeat_half_spearman_brown"])),
+                        ("original_", "top_decile_interleaved_repeat_half_spearman_brown",
+                         first_noise["top_decile_interleaved_repeat_half_spearman_brown"]),
+                        ("retimed_", "top_decile_interleaved_repeat_half_spearman_brown",
+                         again_noise["top_decile_interleaved_repeat_half_spearman_brown"]),
+                        ("", "expected_top_decile_spearman_if_only_repeat_noise_interleaved", _ceiling(
+                            first_noise["top_decile_interleaved_repeat_half_spearman_brown"]
+                            * again_noise["top_decile_interleaved_repeat_half_spearman_brown"])),
+                    )
+                },
                 "median_ratio_retimed_over_original": float(np.median(ratio)),
                 "ratio_p10": float(np.quantile(ratio, 0.10)),
                 "ratio_p90": float(np.quantile(ratio, 0.90)),

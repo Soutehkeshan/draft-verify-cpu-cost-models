@@ -141,12 +141,19 @@ def spearman_brown(rho: float, factor: float = 2.0) -> float:
     return float(factor * rho / (1.0 + (factor - 1.0) * rho))
 
 
-def split_half(repeats: Sequence[float]) -> tuple[float, float]:
-    """Medians of the first len//2 repeats and of the remaining repeats."""
+def split_half(repeats: Sequence[float], interleaved: bool = False) -> tuple[float, float]:
+    """Medians of two halves of one schedule's repeats.
+
+    By default the first len//2 repeats against the rest; with interleaved, the
+    odd- against the even-numbered repeats, which a trend along the repeat
+    sequence (such as warm-up) does not separate.
+    """
     times = np.asarray(repeats, dtype=float)
-    midpoint = times.size // 2
-    if midpoint == 0:
+    if times.size < 2:
         raise ValueError("a split half needs at least two repeats")
+    if interleaved:
+        return float(np.median(times[0::2])), float(np.median(times[1::2]))
+    midpoint = times.size // 2
     return float(np.median(times[:midpoint])), float(np.median(times[midpoint:]))
 
 
