@@ -187,6 +187,13 @@ def restrict_splits(source: dict[str, Any], sample_ids: set[int]) -> dict[str, A
     return restricted
 
 
+def collection_complete(metadata: dict[str, Any]) -> bool:
+    """Read the completion flag from top-level (M2) or ``collection`` (Nano) metadata."""
+    if "collection_complete" in metadata:
+        return bool(metadata["collection_complete"])
+    return bool((metadata.get("collection") or {}).get("collection_complete", False))
+
+
 def save_json(path: Path, payload: Any) -> None:
     """Write JSON atomically via a sibling temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
