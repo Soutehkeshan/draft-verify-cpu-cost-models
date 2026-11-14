@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -22,6 +24,8 @@ from dvcm.analysis import (
     paired_difference,
     resampled_metrics_parallel,
     seed_mean_interval,
+    spearman_brown,
+    split_half,
     value_distribution,
 )
 from dvcm.analytic import (
@@ -564,6 +568,89 @@ def _write_shuffled_label_null(
         )
 
 
+def _scorer_rows(scopes, y_true, predictions):
+    """evaluation.csv rows: random ranking, then every scorer, per scope."""
+    score_rows = []
+    random_summaries = {}
+    for scope_index, (scope, indexes) in enumerate(scopes):
+        scoped_truth = y_true[indexes]
+        random_summary = _random_metrics(
+            scoped_truth,
+            n_draws=1000,
+            seed=10_000 + scope_index,
+        )
+        random_summaries[scope] = random_summary
+        score_rows.append(
+            _score_row(
+                scope,
+                "random",
+                scoped_truth,
+                np.zeros(len(indexes)),
+                seed=scope_index,
+                random_summary=random_summary,
+            )
+        )
+        for scorer_index, (name, prediction) in enumerate(predictions.items()):
+            score_rows.append(
+                _score_row(
+                    scope,
+                    name,
+                    scoped_truth,
+                    prediction[indexes],
+                    seed=scope_index * 100 + scorer_index,
+                )
+            )
+    return score_rows, random_summaries
+
+
+def _ceiling(reliability):
+    return float(np.sqrt(reliability)) if np.isfinite(reliability) and reliability >= 0 else float("nan")
+
+
+def _noise_row(scope, frame, median_column, repeats_column):
+    """Repeat-half agreement of one timing table and its Spearman-Brown full-length estimate.
+
+    The fastest decile is the fastest 10% by the table's own median.
+    """
+    pairs = []
+    repeat_counts = Counter()
+    for median, repeats in zip(frame[median_column], frame[repeats_column]):
+        times = np.asarray(repeats, dtype=float)
+        if times.size >= 2:
+            first, second = split_half(times)
+            pairs.append((float(median), first, second))
+            repeat_counts[times.size] += 1
+    pairs.sort(key=lambda item: item[0])
+    first = np.asarray([item[1] for item in pairs])
+    second = np.asarray([item[2] for item in pairs])
+    decile_n = max(2, int(np.ceil(len(pairs) * 0.1))) if len(pairs) >= 2 else len(pairs)
+    whole = float(spearmanr(first, second).statistic) if len(pairs) > 1 else float("nan")
+    decile = (
+        float(spearmanr(first[:decile_n], second[:decile_n]).statistic)
+        if decile_n > 1
+        else float("nan")
+    )
+    repeats = repeat_counts.most_common(1)[0][0] if repeat_counts else 0
+    half = repeats // 2
+    row = {
+        "scope": scope,
+        "repeat_half_spearman": whole,
+        "n_repeat_pairs": len(pairs),
+        "top_decile_n": decile_n,
+        "top_decile_repeat_half_spearman": decile,
+        "repeat_split": (
+            f"median of repeats 1-{half} vs {half + 1}-{repeats}" if repeats else "n/a"
+        ),
+        "repeat_half_spearman_brown": spearman_brown(whole),
+        "top_decile_repeat_half_spearman_brown": spearman_brown(decile),
+    }
+    row["noise_ceiling_sqrt_spearman_brown"] = _ceiling(row["repeat_half_spearman_brown"])
+    row["top_decile_noise_ceiling_sqrt_spearman_brown"] = _ceiling(
+        row["top_decile_repeat_half_spearman_brown"]
+    )
+    return row
+
+
 def _write_analytic_diagnosis(
     test, layouts, hand_set, fitted, y_true, scopes, provenance, results_dir
 ):
@@ -670,6 +757,101 @@ def _write_analytic_diagnosis(
     write_csv(pd.DataFrame(cache_rows), results_dir / "analytic_cache_effect.csv", provenance)
 
 
+def _write_retime_outputs(test, data_dir, predictions, provenance, results_dir):
+    """Compare the collection medians with a second timing of TEST, when one exists."""
+    path = data_dir / "test_retime.parquet"
+    if not path.exists():
+        return None
+    meta = json.loads((data_dir / "test_retime_meta.json").read_text(encoding="utf-8"))
+    if meta.get("state") != "complete":
+        raise ValueError("test_retime_meta.json does not describe a complete re-timing")
+    retimed = pd.read_parquet(path).set_index("id")
+    ids = test["id"].astype(int).to_numpy()
+    if sorted(retimed.index.astype(int)) != sorted(ids.tolist()):
+        raise ValueError("test_retime.parquet ids differ from the TEST ids")
+    retimed = retimed.loc[ids]
+    for (sketch_id, vector), (re_sketch, re_vector) in zip(
+        zip(test["sketch_id"], test["vector"]), zip(retimed["sketch_id"], retimed["vector"])
+    ):
+        if int(sketch_id) != int(re_sketch) or list(map(int, vector)) != list(map(int, re_vector)):
+            raise ValueError("test_retime.parquet schedules differ from the pool's TEST schedules")
+    keep = np.flatnonzero(
+        retimed["status"].isin(("ok", "slow_skip")).to_numpy()
+        & np.isfinite(retimed["median_ms"].to_numpy(dtype=float))
+        & (retimed["median_ms"].to_numpy(dtype=float) > 0)
+    )
+    original = test.iloc[keep].reset_index(drop=True)
+    second = retimed.iloc[keep].reset_index()
+    scopes = list(_scope_indices(original))
+    original_truth = original["median_ms"].to_numpy(dtype=float)
+    retimed_truth = second["median_ms"].to_numpy(dtype=float)
+    scoped_predictions = {name: values[keep] for name, values in predictions.items()}
+    source = {
+        "retime_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "retime_git_commit": meta["provenance"]["git_commit"],
+        "original_repeats": int(original["repeats_ms"].map(len).max()),
+        "retimed_repeats": int(meta["repeats"]),
+    }
+
+    agreement_rows = []
+    for scope, indexes in scopes:
+        first, again = original_truth[indexes], retimed_truth[indexes]
+        decile_n = max(2, int(np.ceil(len(indexes) * 0.1)))
+        fastest = np.argsort(first, kind="stable")[:decile_n]
+        first_noise = _noise_row(scope, original.iloc[indexes], "median_ms", "repeats_ms")
+        again_noise = _noise_row(scope, second.iloc[indexes], "median_ms", "repeats_ms")
+        ratio = again / first
+        agreement_rows.append(
+            {
+                "scope": scope,
+                "n_schedules": len(indexes),
+                "spearman_original_vs_retimed": spearman(first, again),
+                "fastest_decile_n": decile_n,
+                "fastest_decile_spearman_original_vs_retimed": spearman(
+                    first[fastest], again[fastest]
+                ),
+                "fastest_decile_definition": "fastest 10% by the original median",
+                "original_repeat_half_spearman_brown": first_noise["repeat_half_spearman_brown"],
+                "retimed_repeat_split": again_noise["repeat_split"],
+                "retimed_repeat_half_spearman": again_noise["repeat_half_spearman"],
+                "retimed_repeat_half_spearman_brown": again_noise["repeat_half_spearman_brown"],
+                "expected_spearman_if_only_repeat_noise": _ceiling(
+                    first_noise["repeat_half_spearman_brown"]
+                    * again_noise["repeat_half_spearman_brown"]
+                ),
+                "original_top_decile_repeat_half_spearman_brown": first_noise[
+                    "top_decile_repeat_half_spearman_brown"
+                ],
+                "retimed_top_decile_repeat_half_spearman": again_noise[
+                    "top_decile_repeat_half_spearman"
+                ],
+                "retimed_top_decile_repeat_half_spearman_brown": again_noise[
+                    "top_decile_repeat_half_spearman_brown"
+                ],
+                "expected_top_decile_spearman_if_only_repeat_noise": _ceiling(
+                    first_noise["top_decile_repeat_half_spearman_brown"]
+                    * again_noise["top_decile_repeat_half_spearman_brown"]
+                ),
+                "median_ratio_retimed_over_original": float(np.median(ratio)),
+                "ratio_p10": float(np.quantile(ratio, 0.10)),
+                "ratio_p90": float(np.quantile(ratio, 0.90)),
+                "fraction_differing_over_5pct": float(np.mean(np.abs(ratio - 1.0) > 0.05)),
+                **source,
+            }
+        )
+    write_csv(pd.DataFrame(agreement_rows), results_dir / "retime_agreement.csv", provenance)
+
+    evaluation_rows = []
+    for truth_name, truth in (("original", original_truth), ("retimed", retimed_truth)):
+        rows, _ = _scorer_rows(scopes, truth, scoped_predictions)
+        repeats = source["original_repeats"] if truth_name == "original" else source["retimed_repeats"]
+        evaluation_rows.extend(
+            {"truth": truth_name, "truth_repeats": repeats, **row} for row in rows
+        )
+    write_csv(pd.DataFrame(evaluation_rows), results_dir / "retime_evaluation.csv", provenance)
+    return agreement_rows[0]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     add_target_argument(parser)
@@ -733,36 +915,7 @@ def main() -> None:
     }
     results_dir.mkdir(parents=True, exist_ok=True)
     scopes = list(_scope_indices(test))
-    score_rows = []
-    random_summaries = {}
-    for scope_index, (scope, indexes) in enumerate(scopes):
-        scoped_truth = y_true[indexes]
-        random_summary = _random_metrics(
-            scoped_truth,
-            n_draws=1000,
-            seed=10_000 + scope_index,
-        )
-        random_summaries[scope] = random_summary
-        score_rows.append(
-            _score_row(
-                scope,
-                "random",
-                scoped_truth,
-                np.zeros(len(indexes)),
-                seed=scope_index,
-                random_summary=random_summary,
-            )
-        )
-        for scorer_index, (name, prediction) in enumerate(predictions.items()):
-            score_rows.append(
-                _score_row(
-                    scope,
-                    name,
-                    scoped_truth,
-                    prediction[indexes],
-                    seed=scope_index * 100 + scorer_index,
-                )
-            )
+    score_rows, random_summaries = _scorer_rows(scopes, y_true, predictions)
     write_csv(
         pd.DataFrame(score_rows),
         results_dir / "evaluation.csv",
@@ -933,40 +1086,13 @@ def main() -> None:
         test, layouts, hand_set, fitted, y_true, scopes, provenance, results_dir
     )
 
-    noise_rows = []
-    for scope, indexes in scopes:
-        pairs = []
-        for row in test.iloc[indexes].itertuples(index=False):
-            times = np.asarray(row.repeats_ms, dtype=float)
-            midpoint = len(times) // 2
-            if midpoint and len(times) - midpoint:
-                pairs.append(
-                    (
-                        float(row.median_ms),
-                        float(np.median(times[:midpoint])),
-                        float(np.median(times[midpoint:])),
-                    )
-                )
-        pairs.sort(key=lambda item: item[0])
-        first = np.asarray([item[1] for item in pairs])
-        second = np.asarray([item[2] for item in pairs])
-        decile_n = max(2, int(np.ceil(len(pairs) * 0.1))) if len(pairs) >= 2 else len(pairs)
-        noise_rows.append(
-            {
-                "scope": scope,
-                "repeat_half_spearman": float(spearmanr(first, second).statistic)
-                if len(pairs) > 1
-                else float("nan"),
-                "n_repeat_pairs": len(pairs),
-                "top_decile_n": decile_n,
-                "top_decile_repeat_half_spearman": float(
-                    spearmanr(first[:decile_n], second[:decile_n]).statistic
-                )
-                if decile_n > 1
-                else float("nan"),
-            }
-        )
+    noise_rows = [
+        _noise_row(scope, test.iloc[indexes], "median_ms", "repeats_ms")
+        for scope, indexes in scopes
+    ]
     write_csv(pd.DataFrame(noise_rows), results_dir / "noise_floor.csv", provenance)
+
+    retime = _write_retime_outputs(test, data_dir, predictions, provenance, results_dir)
 
     _write_feature_comparison(
         test, layouts, fitted, y_true, provenance, results_dir
@@ -987,10 +1113,20 @@ def main() -> None:
     print(
         f"Evaluated {len(test)} held-out schedules "
         f"({max(2, int(np.ceil(len(test) * 0.1)))} in the fastest decile); "
-        f"repeat-half Spearman={noise_rows[0]['repeat_half_spearman']:.3f}, "
+        f"repeat-half Spearman={noise_rows[0]['repeat_half_spearman']:.3f} "
+        f"(Spearman-Brown {noise_rows[0]['repeat_half_spearman_brown']:.3f}), "
         f"fastest-decile repeat-half Spearman="
-        f"{noise_rows[0]['top_decile_repeat_half_spearman']:.3f}"
+        f"{noise_rows[0]['top_decile_repeat_half_spearman']:.3f} "
+        f"(Spearman-Brown {noise_rows[0]['top_decile_repeat_half_spearman_brown']:.3f})"
     )
+    if retime is None:
+        print("No complete test_retime.parquet: re-timing comparison skipped")
+    else:
+        print(
+            f"Re-timed TEST ({retime['n_schedules']} schedules, {retime['retimed_repeats']} repeats): "
+            f"Spearman original vs re-timed {retime['spearman_original_vs_retimed']:.3f}, "
+            f"fastest decile {retime['fastest_decile_spearman_original_vs_retimed']:.3f}"
+        )
 
 
 if __name__ == "__main__":
