@@ -164,6 +164,29 @@ def validate_splits(splits: dict[str, Any], sample_ids: set[int]) -> None:
         raise ValueError("The 'all' nested training subset must equal TRAIN")
 
 
+def restrict_splits(source: dict[str, Any], sample_ids: set[int]) -> dict[str, Any]:
+    """Keep an existing split's roles for the given IDs, preserving list order.
+
+    A target that re-measures another target's positions keeps the source's
+    TRAIN/VALIDATION/TEST roles and nested TRAIN subsets, so both targets are
+    scored on the same held-out schedules. IDs outside ``sample_ids`` (not
+    modelable on this target) are dropped from every list.
+    """
+
+    def keep(values: list[Any]) -> list[int]:
+        return [int(value) for value in values if int(value) in sample_ids]
+
+    restricted: dict[str, Any] = {
+        name: keep(source[name]) for name in ("train", "validation", "test")
+    }
+    restricted["nested_train"] = {
+        name: keep(values) for name, values in source["nested_train"].items()
+    }
+    if "seed" in source:
+        restricted["seed"] = source["seed"]
+    return restricted
+
+
 def save_json(path: Path, payload: Any) -> None:
     """Write JSON atomically via a sibling temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)

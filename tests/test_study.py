@@ -5,7 +5,12 @@ import pytest
 import pandas as pd
 
 from dvcm.config import load_target_config
-from dvcm.study import load_layouts, make_splits, validate_splits
+from dvcm.study import (
+    load_layouts,
+    make_splits,
+    restrict_splits,
+    validate_splits,
+)
 
 
 def test_split_validation_requires_disjoint_exhaustive_partitions():
@@ -49,6 +54,25 @@ def test_split_generation_is_seeded_stratified_and_disjoint():
     for partition in ("train", "validation", "test"):
         counts = frame[frame["id"].isin(splits[partition])].groupby("sketch_id").size()
         assert counts.nunique() == 1
+
+
+def test_restrict_splits_keeps_roles_order_and_nesting():
+    source = {
+        "seed": 0,
+        "train": [1, 2, 3, 4],
+        "validation": [5, 6],
+        "test": [8, 7],
+        "nested_train": {"2": [3, 1], "3": [3, 1, 4], "all": [3, 1, 4, 2]},
+    }
+    assert restrict_splits(source, set(range(1, 9))) == source
+
+    restricted = restrict_splits(source, {1, 2, 4, 5, 7, 8})
+
+    assert restricted["train"] == [1, 2, 4]
+    assert restricted["validation"] == [5]
+    assert restricted["test"] == [8, 7]
+    assert restricted["nested_train"] == {"2": [1], "3": [1, 4], "all": [1, 4, 2]}
+    validate_splits(restricted, {1, 2, 4, 5, 7, 8})
 
 
 def test_target_binding_does_not_reuse_legacy_layout_hardware_values(tmp_path):
