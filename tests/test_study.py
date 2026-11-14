@@ -6,6 +6,7 @@ import pandas as pd
 
 from dvcm.config import load_target_config
 from dvcm.study import (
+    collection_complete,
     load_layouts,
     make_splits,
     restrict_splits,
@@ -73,6 +74,14 @@ def test_restrict_splits_keeps_roles_order_and_nesting():
     assert restricted["test"] == [8, 7]
     assert restricted["nested_train"] == {"2": [1], "3": [1, 4], "all": [1, 4, 2]}
     validate_splits(restricted, {1, 2, 4, 5, 7, 8})
+
+
+def test_collection_complete_reads_top_level_and_nested_flags():
+    assert collection_complete({"collection_complete": True})
+    assert collection_complete({"collection": {"collection_complete": True}})
+    assert not collection_complete({"collection": {"collection_complete": False}})
+    assert not collection_complete({"collection": {"state": "running"}})
+    assert not collection_complete({})
 
 
 def test_target_binding_does_not_reuse_legacy_layout_hardware_values(tmp_path):

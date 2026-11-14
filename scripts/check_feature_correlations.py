@@ -21,7 +21,7 @@ from dvcm.config import (
     load_workload_config,
 )
 from dvcm.provenance import capture_provenance, write_csv
-from dvcm.study import load_layouts, load_pool, load_splits
+from dvcm.study import collection_complete, load_layouts, load_pool, load_splits
 
 EXPECTED_SIGNS = {
     "bytes_moved": 1,
@@ -55,7 +55,7 @@ def main() -> None:
         metadata = json.load(source)
     if metadata.get("target_id", target.target_id) != target.target_id:
         raise ValueError("Selected target does not match the collected dataset")
-    if not metadata.get("collection_complete", False):
+    if not collection_complete(metadata):
         raise RuntimeError("Feature correlations require a completed collection")
 
     frame = load_pool(data_dir=data_dir)
