@@ -49,7 +49,7 @@ def main() -> None:
     plots = results_dir / "plots"
     plots.mkdir(parents=True, exist_ok=True)
     evaluation = pd.read_csv(results_dir / "evaluation.csv")
-    learning = pd.read_csv(results_dir / "learning_curve.csv")
+    learning = pd.read_csv(results_dir / "learning_curve_summary.csv")
     draft = pd.read_csv(results_dir / "draft_verify.csv")
     evaluation = evaluation[evaluation["scope"] == "pooled"]
     learning = learning[learning["scope"] == "pooled"]
@@ -74,31 +74,34 @@ def main() -> None:
     )
     axes[0, 0].set_title("Test-set results")
 
-    correlation_axis = axes[0, 1].twinx()
     colors = plt.get_cmap("tab10")
-    for seed, group in learning.groupby("seed", sort=True):
+    for index, (model, group) in enumerate(learning.groupby("model", sort=False)):
         group = group.sort_values("train_size")
-        color = colors(seed)
-        axes[0, 1].plot(
-            group["train_size"],
-            group["top_1_latency_ratio"],
-            marker="o",
-            color=color,
-            label=f"Top-1 seed {seed}",
-        )
-        correlation_axis.plot(
-            group["train_size"],
-            group["spearman"],
-            linestyle="--",
-            color=color,
-            alpha=0.8,
-            label=f"Spearman seed {seed}",
-        )
+        color = colors(index)
+        for metric, style, label in (
+            ("spearman", "-", "Spearman"),
+            ("fastest_decile_spearman", "--", "fastest-decile Spearman"),
+        ):
+            axes[0, 1].plot(
+                group["train_size"],
+                group[f"{metric}_mean"],
+                marker="o",
+                linestyle=style,
+                color=color,
+                label=f"{model} {label}",
+            )
+            axes[0, 1].fill_between(
+                group["train_size"],
+                group[f"{metric}_bootstrap95_low"],
+                group[f"{metric}_bootstrap95_high"],
+                color=color,
+                alpha=0.12,
+            )
     axes[0, 1].set_xscale("log")
     axes[0, 1].set_xlabel("Training schedules")
-    axes[0, 1].set_ylabel("Top-1 latency ratio")
-    correlation_axis.set_ylabel("Spearman correlation")
+    axes[0, 1].set_ylabel("Spearman correlation (mean of 5 seeds, 95% bootstrap)")
     axes[0, 1].set_title("Learning curve")
+    axes[0, 1].legend(fontsize="x-small")
     axes[0, 1].grid(True, alpha=0.25)
 
     for method, group in draft.groupby("draft_method", sort=True):

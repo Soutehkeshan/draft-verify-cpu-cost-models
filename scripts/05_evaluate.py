@@ -16,7 +16,18 @@ from xgboost import XGBRegressor
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dvcm.analytic import AnalyticConstants, Penalties, latency_seconds
+from dvcm.analysis import (
+    REPORTED_METRICS,
+    paired_difference,
+    resampled_metrics_parallel,
+    seed_mean_interval,
+)
+from dvcm.analytic import (
+    AnalyticConstants,
+    Penalties,
+    constants_from_payload,
+    latency_seconds,
+)
 from dvcm.config import (
     add_target_argument,
     experiment_metadata,
@@ -39,13 +50,19 @@ from dvcm.study import (
 )
 
 
-def _read_constants(results_dir: Path) -> tuple[AnalyticConstants, AnalyticConstants]:
+PAIRED_RESAMPLES = 2000
+TRAINING_SEEDS = tuple(range(5))
+LEARNING_MODELS = (("base", "xgb(base)"), ("base_analytic", "xgb(base+analytic)"))
+
+
+def _read_constants(
+    results_dir: Path,
+) -> tuple[AnalyticConstants, AnalyticConstants, dict[str, AnalyticConstants]]:
     with (results_dir / "constants.json").open(encoding="utf-8") as source:
-        payload = json.load(source)
-    return (
-        AnalyticConstants(**payload["hand_set_constants"]),
-        AnalyticConstants(**payload["constants"]),
-    )
+        hand_set, fitted, nested = constants_from_payload(json.load(source))
+    if nested.get("all") != fitted:
+        raise ValueError("constants.json: the 'all' nested constants differ from the TRAIN fit")
+    return hand_set, fitted, nested
 
 
 def _model_features(frame, layouts, include_derived, constants):
@@ -182,69 +199,121 @@ def _draft_only_ratio(y_true, draft_scores, k):
     return float(y_true[selected] / np.min(y_true))
 
 
-def _paired_comparison(
-    y_true,
-    base_seed_predictions,
-    hybrid_seed_predictions,
-    scopes,
-    provenance,
-    results_dir,
+def _write_paired_and_learning_curve(
+    test, layouts, fitted, nested, splits, y_true, scopes, provenance, results_dir
 ):
-    rows = []
-    metric_names = (
-        "spearman",
-        "fastest_decile_spearman",
-        "top_10_recall_in_30",
-        "top_1_latency_ratio",
-        "top_5_latency_ratio",
-    )
-    for scope_index, (scope, indexes) in enumerate(scopes):
-        truth = y_true[indexes]
-        base = [prediction[indexes] for prediction in base_seed_predictions]
-        hybrid = [prediction[indexes] for prediction in hybrid_seed_predictions]
-        base_values = [_metric_values(truth, prediction) for prediction in base]
-        hybrid_values = [_metric_values(truth, prediction) for prediction in hybrid]
-        rng = np.random.default_rng(20260 + scope_index)
-        bootstrapped = {name: [] for name in metric_names}
-        for _ in range(2000):
-            sample = rng.integers(0, len(truth), size=len(truth))
-            deltas = {name: [] for name in metric_names}
-            for base_prediction, hybrid_prediction in zip(base, hybrid):
-                base_metrics = _metric_values(
-                    truth[sample], base_prediction[sample]
-                )
-                hybrid_metrics = _metric_values(
-                    truth[sample], hybrid_prediction[sample]
-                )
-                for name in metric_names:
-                    deltas[name].append(hybrid_metrics[name] - base_metrics[name])
-            for name in metric_names:
-                bootstrapped[name].append(float(np.mean(deltas[name])))
+    """Paired base-vs-hybrid comparison at every nested TRAIN size, on shared TEST resamples.
 
-        for name in metric_names:
-            base_seed_values = np.asarray([values[name] for values in base_values])
-            hybrid_seed_values = np.asarray([values[name] for values in hybrid_values])
-            differences = hybrid_seed_values - base_seed_values
-            low, high = np.quantile(bootstrapped[name], [0.025, 0.975])
-            rows.append(
-                {
+    Each scope draws its resamples from seed 20260 + scope index, so the
+    full-TRAIN rows are the paired comparison of paired_comparison.csv.
+    """
+    sizes = list(splits["nested_train"])
+    train_sizes = {name: len(ids) for name, ids in splits["nested_train"].items()}
+    predictions = {
+        (feature_set, size_name, seed): _predict_model_seed(
+            test,
+            layouts,
+            nested[size_name] if feature_set == "base_analytic" else fitted,
+            feature_set,
+            size_name,
+            seed,
+            results_dir,
+        )
+        for feature_set, _ in LEARNING_MODELS
+        for size_name in sizes
+        for seed in TRAINING_SEEDS
+    }
+    keys = list(predictions)
+    tasks = [
+        (y_true[indexes], predictions[key][indexes], 20260 + scope_index)
+        for scope_index, (_, indexes) in enumerate(scopes)
+        for key in keys
+    ]
+    resampled_values = iter(resampled_metrics_parallel(tasks, PAIRED_RESAMPLES))
+    resampled = {
+        (scope, key): next(resampled_values) for scope, _ in scopes for key in keys
+    }
+
+    seed_rows, summary_rows, paired_rows, comparison_rows = [], [], [], []
+    for scope, indexes in scopes:
+        truth = y_true[indexes]
+        point = {
+            key: _metric_values(truth, prediction[indexes])
+            for key, prediction in predictions.items()
+        }
+        for feature_set, model in LEARNING_MODELS:
+            for size_name in sizes:
+                model_keys = [(feature_set, size_name, seed) for seed in TRAINING_SEEDS]
+                constants_note = (
+                    "fitted on this subset" if feature_set == "base_analytic" else "not used"
+                )
+                for key in model_keys:
+                    seed_rows.append(
+                        {
+                            "scope": scope,
+                            "model": model,
+                            "feature_set": feature_set,
+                            "train_size": train_sizes[size_name],
+                            "subset": size_name,
+                            "seed": key[2],
+                            "analytic_constants": constants_note,
+                            **{name: point[key][name] for name in REPORTED_METRICS},
+                        }
+                    )
+                summary = seed_mean_interval(
+                    [point[key] for key in model_keys],
+                    [resampled[(scope, key)] for key in model_keys],
+                )
+                summary_rows.append(
+                    {
+                        "scope": scope,
+                        "model": model,
+                        "feature_set": feature_set,
+                        "train_size": train_sizes[size_name],
+                        "subset": size_name,
+                        "n_test": len(indexes),
+                        "seed_count": len(model_keys),
+                        "analytic_constants": constants_note,
+                        **{
+                            f"{name}_{statistic}": value
+                            for name, statistics in summary.items()
+                            for statistic, value in statistics.items()
+                        },
+                        "bootstrap_resamples": PAIRED_RESAMPLES,
+                    }
+                )
+        for size_name in sizes:
+            base_keys = [("base", size_name, seed) for seed in TRAINING_SEEDS]
+            hybrid_keys = [("base_analytic", size_name, seed) for seed in TRAINING_SEEDS]
+            differences = paired_difference(
+                [point[key] for key in base_keys],
+                [point[key] for key in hybrid_keys],
+                [resampled[(scope, key)] for key in base_keys],
+                [resampled[(scope, key)] for key in hybrid_keys],
+            )
+            for name in REPORTED_METRICS:
+                row = {
                     "scope": scope,
                     "n_test": len(indexes),
                     "metric": name,
                     "difference_definition": "xgb(base+analytic) minus xgb(base)",
-                    "base_mean_over_seeds": float(np.mean(base_seed_values)),
-                    "base_seed_std": float(np.std(base_seed_values, ddof=1)),
-                    "hybrid_mean_over_seeds": float(np.mean(hybrid_seed_values)),
-                    "hybrid_seed_std": float(np.std(hybrid_seed_values, ddof=1)),
-                    "difference_mean_over_seeds": float(np.mean(differences)),
-                    "difference_seed_std": float(np.std(differences, ddof=1)),
-                    "paired_bootstrap_ci_low": float(low),
-                    "paired_bootstrap_ci_high": float(high),
-                    "bootstrap_resamples": 2000,
-                    "training_seeds": 5,
+                    **differences[name],
+                    "bootstrap_resamples": PAIRED_RESAMPLES,
+                    "training_seeds": len(TRAINING_SEEDS),
                 }
-            )
-    write_csv(pd.DataFrame(rows), results_dir / "paired_comparison.csv", provenance)
+                paired_rows.append(
+                    {"train_size": train_sizes[size_name], "subset": size_name, **row}
+                )
+                if size_name == "all":
+                    comparison_rows.append(row)
+    write_csv(pd.DataFrame(comparison_rows), results_dir / "paired_comparison.csv", provenance)
+    write_csv(pd.DataFrame(seed_rows), results_dir / "learning_curve.csv", provenance)
+    write_csv(
+        pd.DataFrame(summary_rows), results_dir / "learning_curve_summary.csv", provenance
+    )
+    write_csv(
+        pd.DataFrame(paired_rows), results_dir / "learning_curve_paired.csv", provenance
+    )
 
 
 def _t_interval(values):
@@ -516,7 +585,7 @@ def main() -> None:
     test = frame[frame["id"].astype(int).isin(test_ids)].reset_index(drop=True)
     if test.empty:
         raise ValueError("The test split contains no modelable measurements")
-    hand_set, fitted = _read_constants(results_dir)
+    hand_set, fitted, nested = _read_constants(results_dir)
     y_true = test["median_ms"].to_numpy(dtype=float)
 
     base_seed_predictions = [
@@ -601,13 +670,8 @@ def main() -> None:
         f"(recall fraction={pooled_random_recall:.4f}, expected "
         f"{30 / len(y_true):.4f})."
     )
-    _paired_comparison(
-        y_true,
-        base_seed_predictions,
-        hybrid_seed_predictions,
-        scopes,
-        provenance,
-        results_dir,
+    _write_paired_and_learning_curve(
+        test, layouts, fitted, nested, splits, y_true, scopes, provenance, results_dir
     )
 
     draft_scores = {
@@ -762,62 +826,6 @@ def main() -> None:
             }
         )
     write_csv(pd.DataFrame(noise_rows), results_dir / "noise_floor.csv", provenance)
-
-    learning_rows = []
-    for scope, indexes in scopes:
-        scoped_test = test.iloc[indexes].reset_index(drop=True)
-        scoped_truth = y_true[indexes]
-        for size_name, subset_ids in splits["nested_train"].items():
-            for seed in range(5):
-                prediction = _predict_model_seed(
-                    scoped_test,
-                    layouts,
-                    fitted,
-                    "base_analytic",
-                    size_name,
-                    seed,
-                    results_dir,
-                )
-                learning_rows.append(
-                    {
-                        "scope": scope,
-                        "train_size": len(subset_ids),
-                        "subset": size_name,
-                        "seed": seed,
-                        "spearman": spearman(scoped_truth, prediction),
-                        "top_1_latency_ratio": top_k_latency_ratio(
-                            scoped_truth, np.argsort(prediction), 1
-                        ),
-                    }
-                )
-    learning = pd.DataFrame(learning_rows)
-    write_csv(learning, results_dir / "learning_curve.csv", provenance)
-    learning_summary = []
-    for (scope, train_size, subset), group in learning.groupby(
-        ["scope", "train_size", "subset"], sort=False
-    ):
-        rho_mean, rho_low, rho_high = _t_interval(group["spearman"])
-        ratio_mean, ratio_low, ratio_high = _t_interval(group["top_1_latency_ratio"])
-        ratio_low = max(1.0, ratio_low)
-        learning_summary.append(
-            {
-                "scope": scope,
-                "train_size": train_size,
-                "subset": subset,
-                "seed_count": len(group),
-                "spearman_mean": rho_mean,
-                "spearman_ci95_low": rho_low,
-                "spearman_ci95_high": rho_high,
-                "top_1_latency_ratio_mean": ratio_mean,
-                "top_1_ci95_low": ratio_low,
-                "top_1_ci95_high": ratio_high,
-            }
-        )
-    write_csv(
-        pd.DataFrame(learning_summary),
-        results_dir / "learning_curve_summary.csv",
-        provenance,
-    )
 
     _write_feature_comparison(
         test, layouts, fitted, y_true, provenance, results_dir

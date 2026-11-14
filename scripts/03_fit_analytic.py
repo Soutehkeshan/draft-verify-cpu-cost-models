@@ -27,6 +27,41 @@ from dvcm.study import (
     validate_splits,
 )
 
+FITTED_NAMES = ("peak_flops", "bandwidth_bytes_s")
+
+
+def _fit_frame(frame, layouts, initial):
+    return fit_constants(
+        [np.asarray(value, dtype=float) for value in frame["vector"]],
+        [layouts[int(value)] for value in frame["sketch_id"]],
+        frame["median_ms"].to_numpy(dtype=float),
+        initial=initial,
+    )
+
+
+def fit_nested_constants(train, nested_train, layouts, initial, train_fit):
+    """Refit the fitted constants on each nested TRAIN subset, rows in pool order.
+
+    A subset that equals TRAIN reuses ``train_fit``, the fit of identical
+    inputs, so the full-TRAIN models keep exactly the same analytic feature.
+    """
+    train_ids = {int(value) for value in train["id"]}
+    nested = {}
+    for size_name, subset_ids in nested_train.items():
+        ids = {int(value) for value in subset_ids}
+        subset = train[train["id"].astype(int).isin(ids)]
+        if subset.empty:
+            continue
+        fitted = train_fit if ids == train_ids else _fit_frame(subset, layouts, initial)
+        nested[size_name] = {
+            "training_samples": len(subset),
+            "constants": fitted.to_dict(),
+            "fit_multipliers": {
+                name: getattr(fitted, name) / getattr(initial, name) for name in FITTED_NAMES
+            },
+        }
+    return nested
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -49,15 +84,8 @@ def main() -> None:
     train = frame[frame["id"].astype(int).isin(train_ids)]
     layouts = load_layouts(data_dir, target)
     defaults = AnalyticConstants.from_target(target)
-    positions = [np.asarray(value, dtype=float) for value in train["vector"]]
-    layout_values = [layouts[int(value)] for value in train["sketch_id"]]
-    fitted = fit_constants(
-        positions,
-        layout_values,
-        train["median_ms"].to_numpy(dtype=float),
-        initial=defaults,
-    )
-    fitted_names = ("peak_flops", "bandwidth_bytes_s")
+    fitted = _fit_frame(train, layouts, defaults)
+    fitted_names = FITTED_NAMES
     fit_multipliers = {
         name: getattr(fitted, name) / getattr(defaults, name)
         for name in fitted_names
@@ -76,6 +104,13 @@ def main() -> None:
         "fitted_constants": list(fitted_names),
         "fit_multipliers": fit_multipliers,
         "hand_set_constants": defaults.to_dict(),
+        "nested_train_constants": fit_nested_constants(
+            train, splits["nested_train"], layouts, defaults, fitted
+        ),
+        "nested_train_constants_note": (
+            "peak_flops and bandwidth_bytes_s refit on each nested TRAIN subset only; "
+            "the learning-curve models of a subset use its constants"
+        ),
     }
     write_json(results_dir / "constants.json", payload, provenance)
     print(f"Fitted analytic constants on {len(train)} training schedules")
@@ -83,6 +118,13 @@ def main() -> None:
         print(
             f"{name}: {getattr(defaults, name):.6g} -> "
             f"{getattr(fitted, name):.6g} ({fit_multipliers[name]:.3g}x)"
+        )
+    for size_name, entry in payload["nested_train_constants"].items():
+        print(
+            f"nested {size_name} ({entry['training_samples']} schedules): "
+            + ", ".join(
+                f"{name} {entry['fit_multipliers'][name]:.3g}x" for name in fitted_names
+            )
         )
 
 

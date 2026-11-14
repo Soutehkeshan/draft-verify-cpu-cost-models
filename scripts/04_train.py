@@ -13,7 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dvcm.analytic import AnalyticConstants, latency_seconds
+from dvcm.analytic import constants_from_payload, latency_seconds
 from dvcm.config import (
     add_target_argument,
     experiment_metadata,
@@ -72,7 +72,7 @@ def main() -> None:
     import json
 
     with constants_path.open(encoding="utf-8") as source:
-        constants = AnalyticConstants(**json.load(source)["constants"])
+        _, constants, nested_constants = constants_from_payload(json.load(source))
 
     train_ids = set(int(value) for value in splits["train"])
     validation_ids = set(int(value) for value in splits["validation"])
@@ -123,7 +123,10 @@ def main() -> None:
             subset = train_frame[train_frame["id"].astype(int).isin(subset_id_set)]
             if subset.empty:
                 continue
-            x_subset = _feature_matrix(subset, layouts, include_derived, constants)
+            # The analytic feature uses constants refit on this same subset.
+            x_subset = _feature_matrix(
+                subset, layouts, include_derived, nested_constants[size_name]
+            )
             for seed in range(5):
                 model = train_xgb(
                     x_subset,
@@ -152,6 +155,10 @@ def main() -> None:
                 "subsample": 0.8,
                 "colsample_bytree": 0.8,
                 "random_seeds": list(range(5)),
+                "grid_analytic_constants": "fitted on all of TRAIN (constants.json constants)",
+                "nested_model_analytic_constants": (
+                    "fitted on the same nested TRAIN subset (constants.json nested_train_constants)"
+                ),
             },
         },
         provenance,

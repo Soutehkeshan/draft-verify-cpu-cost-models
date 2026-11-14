@@ -50,6 +50,22 @@ class AnalyticConstants:
         return cls(**target.analytic_constants())
 
 
+def constants_from_payload(
+    payload: dict[str, Any],
+) -> tuple[AnalyticConstants, AnalyticConstants, dict[str, AnalyticConstants]]:
+    """Hand-set, TRAIN-fitted, and per-nested-subset constants from constants.json."""
+    nested = payload.get("nested_train_constants")
+    if not nested:
+        raise ValueError(
+            "constants.json has no nested_train_constants; rerun scripts/03_fit_analytic.py"
+        )
+    return (
+        AnalyticConstants(**payload["hand_set_constants"]),
+        AnalyticConstants(**payload["constants"]),
+        {name: AnalyticConstants(**entry["constants"]) for name, entry in nested.items()},
+    )
+
+
 @dataclass(frozen=True)
 class Penalties:
     vector: bool = True
