@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import itertools
 import sys
 from pathlib import Path
 
@@ -21,7 +20,7 @@ from dvcm.config import (
     load_workload_config,
 )
 from dvcm.features import features
-from dvcm.learned import train_xgb
+from dvcm.learned import HYPERPARAMETER_GRID, train_xgb
 from dvcm.provenance import capture_provenance, write_companion, write_json
 from dvcm.study import (
     load_layouts,
@@ -81,13 +80,7 @@ def main() -> None:
     if train_frame.empty or validation_frame.empty:
         raise ValueError("Both train and validation splits need modelable measurements")
 
-    grid = list(
-        itertools.product(
-            (3, 6),
-            (0.03, 0.1),
-            (100, 300),
-        )
-    )
+    grid = list(HYPERPARAMETER_GRID)
     model_dir = results_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     best_configs = {}

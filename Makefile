@@ -11,7 +11,7 @@ SMOKE_DATA_DIR ?= /tmp/dvcm-study-smoke
 TARGET ?= jetson_nano
 FORCE_SPLIT_FLAG = $(if $(FORCE_SPLIT),--force,)
 
-.PHONY: smoke data split models eval all
+.PHONY: smoke data split models eval transfer all
 
 smoke:
 	$(PYTHON) -m pytest -q
@@ -37,6 +37,10 @@ models:
 eval: models
 	$(PYTHON) scripts/05_evaluate.py --target "$(TARGET)" $(ALLOW_DIRTY_FLAG)
 	$(PYTHON) scripts/06_plots.py --target "$(TARGET)" $(ALLOW_DIRTY_FLAG)
+
+# M2 -> Nano transfer on the Nano TEST set; run `make eval` for apple_m2 and jetson_nano first.
+transfer:
+	$(PYTHON) scripts/07_transfer.py $(ALLOW_DIRTY_FLAG)
 
 all: smoke
 	$(MAKE) data TARGET="$(TARGET)"

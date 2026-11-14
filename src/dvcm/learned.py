@@ -2,9 +2,13 @@
 """XGBoost log-latency models and deterministic data preparation."""
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import numpy as np
+
+# (max_depth, learning_rate, n_estimators) settings searched on VALIDATION.
+HYPERPARAMETER_GRID = tuple(itertools.product((3, 6), (0.03, 0.1), (100, 300)))
 
 
 def train_xgb(
