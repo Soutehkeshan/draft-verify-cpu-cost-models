@@ -14,7 +14,18 @@ scheduling are out of scope.
 
 ## Current status
 
-**NANO RPC QUALIFICATION COMPLETE — NANO COLLECTION ENABLED (EXPLICIT `llvm` RULES)**
+**NANO COLLECTION COMPLETE — MODELS TRAINED AND EVALUATED ON THE SHARED TEST SET**
+
+The Nano re-measured all 5,000 schedules of the M2 pool in one RPC session
+from commit `db2cf1c` (TEST first, then VALIDATION, then TRAIN): 4,966 `ok`
+and 34 `slow_skip`, no build failures or wrong results, per-batch canary drift
+between +0.01% and +0.88%, and no CPU clock drop or throttling. The Nano split
+reuses the M2 split, so both targets share the same 752 TEST schedules. The
+analytic constants were fitted and XGBoost was trained on TRAIN, with its
+settings chosen on VALIDATION, and every scorer was evaluated once on TEST;
+see "Nano results" below, `results/jetson_nano/`, and the collection summary
+in `data/nano/collection_report.md`. The rest of this section records how the
+Nano path was brought up and qualified.
 
 The M2 successfully cross-compiled and exported AArch64 CPU code for
 `aarch64-linux-gnu` / `cortex-a57`, then loaded and executed it on the Nano
@@ -54,7 +65,7 @@ from the model implementations.
 
 | Profile | Known configuration | Status |
 |---|---|---|
-| `jetson_nano` | NVIDIA Jetson Nano 4GB Developer Kit; ARM Cortex-A57; four CPU cores; reported Ubuntu 18.04.5, aarch64, L4T R32.5.0 / JetPack 4.5, GCC 7.5.0, Python 3.6.9. CUDA 10.2 is recorded as installed but is not used. | Primary target; compiler target verified by the RPC proof of concept. Schedule rules and model assumptions remain unset. |
+| `jetson_nano` | NVIDIA Jetson Nano 4GB Developer Kit; ARM Cortex-A57; four CPU cores; reported Ubuntu 18.04.5, aarch64, L4T R32.5.0 / JetPack 4.5, GCC 7.5.0, Python 3.6.9. CUDA 10.2 is recorded as installed but is not used. | Primary target. Explicit `llvm` schedule rules and postprocessors; SIMD, cache, and register values from the Nano; peak compute and bandwidth fitted on TRAIN. 5,000 schedules measured over RPC. |
 | `apple_m2` | MacBook Air Apple M2, arm64, four cores; existing TVM LLVM target and M2 study assumptions. | Compatibility profile for the previously collected M2 dataset and local smoke tests. |
 
 The M2 profile's 400 GFLOP/s and 100 GB/s values are legacy analytical-fit
@@ -136,9 +147,9 @@ another target.
 - `tests/`: synthetic unit tests plus host TVM schedule/build smoke tests.
 
 The harness takes a target and postprocessor configuration rather than
-selecting Apple M2 internally. However, the available compiler profile is
-currently tested only for the existing M2 development setup. This interface is
-not a claim that the Nano can compile or run the schedules.
+selecting Apple M2 internally. The M2 profile runs locally (`make smoke`); the
+Nano profile cross-compiles on the M2 and runs over RPC, which is how the 5,000
+Nano schedules were measured.
 
 ## Data and experiment methodology
 
@@ -172,6 +183,10 @@ and as the
 
 The split is seeded and stratified by sketch ID: 70% TRAIN, 15% VALIDATION,
 and 15% TEST. Splits are disjoint and exhaustive over modelable measurements.
+The Nano pool re-measured the M2 pool's positions, so `02_split.py` reuses the
+M2 split named, with its sha256, in `data/nano/run_meta.json`, restricted to
+the schedules modelable on the Nano (all 5,000), instead of drawing a new one;
+both targets share the same TEST schedules.
 The analytic constants are fit using TRAIN labels only. The XGBoost grid is
 selected using VALIDATION labels only, after which the final models are trained
 on the designated TRAIN subsets. TEST labels are reserved for reporting.
@@ -370,6 +385,94 @@ RPC session indices, per-batch canary drift, frequency and temperature,
 throttling, M2-vs-Nano Spearman (pooled and per sketch), the Nano latency
 distribution, and output checksums.
 
+After the collection:
+
+```sh
+make split TARGET=jetson_nano  # data/nano/splits.json from the M2 split (shared TEST set)
+make eval TARGET=jetson_nano   # TRAIN-only feature correlations, analytic fit, training,
+                               # TEST evaluation, and plots into results/jetson_nano/
+```
+
+An existing split is preserved unless `FORCE_SPLIT=1`; the result scripts
+require a clean worktree.
+
+## Nano results (TEST, 752 schedules)
+
+`make eval TARGET=jetson_nano` produced these at commit `678e873` with a clean
+worktree; the files are in `results/jetson_nano/`. TRAIN (3,499 schedules)
+fitted the analytic constants and trained XGBoost, VALIDATION (749) selected
+the XGBoost settings (depth 6, learning rate 0.1, 300 trees for both feature
+sets), and TEST was used only for the numbers below. XGBoost rows score the
+mean prediction of five training seeds. Brackets are 95% bootstrap intervals
+over TEST schedules (1,000 resamples); for random ranking they are the
+2.5–97.5% range of 1,000 random orders. Latency ratios are lower-is-better.
+
+| Scorer | Spearman | Fastest-decile Spearman | Top-10 recall in 30 | Top-1 latency ratio |
+|---|---|---|---|---|
+| Random | 0.000 [−0.075, 0.070] | 0.001 | 0.04 [0.00, 0.20] | 6.74 [1.21, 33.57] |
+| Analytic, hand-set constants | 0.405 [0.351, 0.462] | −0.004 | 0.10 [0.00, 0.30] | 1.80 [1.38, 5.93] |
+| Analytic, TRAIN-fitted constants | 0.442 [0.382, 0.499] | −0.010 | 0.10 [0.00, 0.30] | 1.80 [1.38, 5.93] |
+| XGBoost, schedule features | 0.934 [0.921, 0.945] | 0.412 | 0.60 [0.30, 1.00] | 1.31 [1.05, 1.31] |
+| XGBoost, schedule + analytical features | 0.940 [0.926, 0.951] | 0.497 | 0.90 [0.60, 1.00] | 1.07 [1.00, 1.17] |
+
+XGBoost ranks the Nano TEST schedules far better than the analytical model
+alone, which does not order the fastest decile at all. Adding the analytical
+features to XGBoost (`paired_comparison.csv`; metrics averaged over the five
+seeds, intervals from 2,000 paired resamples of TEST):
+
+| Metric | Schedule features | + analytical | Difference [95% CI] |
+|---|---|---|---|
+| Spearman | 0.931 | 0.937 | +0.006 [+0.001, +0.012] |
+| Fastest-decile Spearman | 0.400 | 0.472 | +0.073 [−0.026, +0.179] |
+| Top-10 recall in 30 | 0.56 | 0.76 | +0.20 [0.00, +0.38] |
+| Top-1 latency ratio | 1.250 | 1.096 | −0.155 [−0.229, +0.007] |
+| Top-5 latency ratio | 1.187 | 1.122 | −0.065 [−0.156, +0.016] |
+
+The overall Spearman gain is small, its interval excludes zero, and all five
+seeds improve (0.927–0.933 to 0.935–0.938). The larger gains near the top of
+the ranking point the same way, but their intervals reach zero, so this TEST
+set does not establish them; the top-1 ratio improves for four of the five
+seeds. By sketch, the Spearman gain holds for sketch 2 (+0.0107 [+0.0015,
++0.0213]), is borderline for sketch 1 (+0.0095 [−0.0002, +0.0197]), and is
+absent for sketch 0 (−0.0034 [−0.0130, +0.0055]).
+
+Other outputs:
+
+- **Analytic constants** (`constants.json`): the TRAIN fit moves peak compute
+  from 47.3 to 12.3 GFLOP/s (0.26x) and bandwidth from 10.0 to 8.3 GB/s
+  (0.83x). These are effective model constants, not measured rates. Fitting
+  raises the analytic Spearman from 0.405 to 0.442 and leaves its top-1 ratio
+  at 1.80.
+- **Analytic penalties** (`ablations.csv`): without the vector penalty the
+  fitted analytic model's Spearman falls from 0.442 to 0.136; removing the
+  parallel, cache, or register penalty changes it by 0.043 or less, although
+  without the cache penalty its top-1 ratio worsens from 1.80 to 5.46.
+- **Learning curve** (`learning_curve_summary.csv`; schedule + analytical
+  features, mean of five seeds): Spearman 0.796, 0.842, 0.893, 0.906, 0.926,
+  and 0.937 with 100, 250, 500, 1,000, 2,000, and 3,499 TRAIN schedules. The
+  top-1 ratio does not fall steadily (1.10–1.31).
+- **Draft then verify** (`draft_verify.csv`): when XGBoost with schedule
+  features drafts 32 candidates and the hybrid model chooses among them, the
+  choice reaches the hybrid's own top-1 ratio (1.071). Analytic drafts need 64
+  candidates and random drafts 128 to reach it.
+- **Timing noise** (`noise_floor.csv`): the Spearman between the medians of
+  repeats 1–2 and 3–5 of each TEST schedule is 0.994 overall but 0.579 within
+  the fastest decile (75 schedules), so rankings among the fastest schedules
+  are limited by timing noise as well as by the models.
+- **Leakage check** (`shuffled_label_null.csv`): XGBoost trained on globally
+  permuted TRAIN labels has mean TEST Spearman 0.003 (schedule features) and
+  0.007 (+ analytical) over 20 permutations each, within two standard errors of
+  zero.
+- **TRAIN-only feature correlations** (`feature_correlations.csv`):
+  vector-lane utilisation (−0.44), parallel utilisation (−0.18), and bytes
+  moved (+0.07) correlate with latency in the expected direction; register
+  utilisation is flat (−0.001) and is used only by the analytic penalty.
+- **Cross-target ranking:** on the 4,966 schedules that were `ok` on the Nano,
+  Nano and M2 latencies have Spearman 0.861 (`data/nano/collection_report.md`).
+
+Figures: `results/jetson_nano/plots/overview.pdf` and
+`results/jetson_nano/plots/measured_vs_predicted.pdf`.
+
 ## What is tested and what remains
 
 **Tested locally:** profile loading and validation; target-bound feature
@@ -392,15 +495,17 @@ generation and transfer are recorded once in run metadata. The qualification
 added: design-space and loop-order parity with the M2 collection; 150
 replayed M2-pool schedules, all correct and timed with the M2 protocol; a
 20-schedule canary over five rounds and a second RPC session; and a NEON FMA
-peak check.
+peak check. The collection then measured all 5,000 M2-pool schedules; all
+passed the correctness check, and 34 exceeded the slow threshold and kept a
+single timing (`slow_skip`).
 
 **Existing M2 evidence:** the released M2 dataset and historical M2 result
 artifacts. These are not re-labeled or reinterpreted as Nano measurements.
 
-**Awaiting:** schedule-space reliability beyond the 198 qualified positions,
-TRAIN-calibrated compute/bandwidth constants, and the Nano collection,
-training, and TEST evaluation. No Nano dataset or model-evaluation results are
-reported; the qualification timings are diagnostic only.
+**Not covered:** positions outside the 5,000 replayed M2-pool schedules (no
+new positions were sampled on the Nano), other workloads and data types,
+hardware counters, and pinned CPU or memory clocks. The qualification timings
+remain diagnostic only; the Nano results come from the collection.
 
 ## Handoff: Nano-specific work
 
@@ -413,20 +518,25 @@ reported; the qualification timings are diagnostic only.
    `configs/hardware/jetson_nano.json` now sets both fields to `llvm`.
 3. SIMD width, cache sizes, and register count are set in
    `configs/hardware/jetson_nano.json` with their sources in its `notes`;
-   peak compute and bandwidth there are initial guesses, fitted on TRAIN only.
+   peak compute and bandwidth there are initial guesses; the TRAIN-only fit
+   is in `results/jetson_nano/constants.json`.
 4. Continue using the isolated Python 3.10 RPC environment; do not modify
    system Python, CUDA, JetPack, drivers, or system packages.
-5. Collect with the Nano collection path (see "Nano qualification"), then
-   split, train, and evaluate on the shared TEST set.
+5. Done: the Nano collection (`data/nano/`), the split derived from the M2
+   split, training, and the TEST evaluation (`results/jetson_nano/`; see
+   "Nano results"). Rerun with `make split TARGET=jetson_nano` and
+   `make eval TARGET=jetson_nano` from a clean worktree.
 
 ## Limitations and references
 
 The RPC path uses the repository's existing TVM MetaSchedule implementation
-and version. Only 198 of the 3,704,400 encoded positions (48 bounded
-candidates and 150 replayed M2-pool schedules) have been validated on the
-Nano before collection. CPU clocks are not pinned (`schedutil` governor;
-`jetson_clocks` and the memory clock need root and were not read), and some
-schedules shift by a few percent between RPC sessions. Analytical features are
+and version. The Nano measured 5,000 of the 3,704,400 encoded positions (the
+M2 pool's uniform sample) plus 48 bounded qualification candidates. CPU clocks
+are not pinned (`schedutil` governor; `jetson_clocks` and the memory clock need
+root and were not read), and some schedules shift by a few percent between RPC
+sessions, so the collection ran in a single session. TEST was measured first
+and TRAIN last within one 2 h 41 min run; canary drift stayed below 1% in every
+batch. Analytical features are
 estimates and omit hardware counters. The current workload is only one FP32
 matrix size. Timing quality depends on device power, thermal, and scheduling
 conditions.
