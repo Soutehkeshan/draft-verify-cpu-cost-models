@@ -24,8 +24,15 @@ reuses the M2 split, so both targets share the same 752 TEST schedules. The
 analytic constants were fitted and XGBoost was trained on TRAIN, with its
 settings chosen on VALIDATION, and every scorer was evaluated once on TEST;
 see "Nano results" below, `results/jetson_nano/`, and the collection summary
-in `data/nano/collection_report.md`. The rest of this section records how the
-Nano path was brought up and qualified.
+in `data/nano/collection_report.md`.
+
+Further analyses on the same data and split, with the code at `d78acec`:
+the M2 pool evaluated with the same code (`results/apple_m2/`), learning
+curves for both feature sets with the analytic constants refit on every
+TRAIN subset, an M2-to-Nano transfer evaluation, a diagnosis of the
+analytical model, a Spearman-Brown noise ceiling, and a second timing of all
+752 Nano TEST schedules in a new RPC session; see "Final analyses" below. The
+rest of this section records how the Nano path was brought up and qualified.
 
 The M2 successfully cross-compiled and exported AArch64 CPU code for
 `aarch64-linux-gnu` / `cortex-a57`, then loaded and executed it on the Nano
@@ -135,6 +142,9 @@ another target.
   split generation.
 - `src/dvcm/rpc.py`: TVM RPC session, module export/upload/link timing, and
   remote inputs.
+- `src/dvcm/analysis.py`: TEST resampling shared by the result scripts
+  (seed-paired bootstrap differences and seed means), the Spearman-Brown
+  correction, split halves, and penalty distributions.
 - `src/dvcm/device_state.py` and `scripts/nano_device_state.py`: read-only Nano
   clock, frequency-residency, thermal, power-mode, and load snapshots.
 - `src/dvcm/telemetry.py` and `scripts/nano_telemetry.py`: the Nano thread
@@ -144,6 +154,9 @@ another target.
   prints validation metadata and results without writing a dataset.
 - `scripts/qualify_nano.py`: Nano qualification steps (see below);
   `scripts/nano_fma_peak.c`: NEON FMA throughput check.
+- `scripts/07_transfer.py`: M2-to-Nano transfer evaluation (`make transfer`).
+- `scripts/retime_nano_test.py`: a second timing of the Nano TEST schedules
+  in one new RPC session.
 - `tests/`: synthetic unit tests plus host TVM schedule/build smoke tests.
 
 The harness takes a target and postprocessor configuration rather than
@@ -391,15 +404,29 @@ After the collection:
 make split TARGET=jetson_nano  # data/nano/splits.json from the M2 split (shared TEST set)
 make eval TARGET=jetson_nano   # TRAIN-only feature correlations, analytic fit, training,
                                # TEST evaluation, and plots into results/jetson_nano/
+make eval TARGET=apple_m2      # the M2 pool with the same code into results/apple_m2/
+make transfer                  # M2 -> Nano transfer on the Nano TEST set (after both evals)
 ```
 
 An existing split is preserved unless `FORCE_SPLIT=1`; the result scripts
-require a clean worktree.
+require a clean worktree. The second timing of the TEST schedules writes
+`data/nano/test_retime.parquet` plus its canary, batch and metadata files and
+never overwrites anything:
+
+```sh
+PYTHONPATH=src python scripts/retime_nano_test.py --rpc-host 127.0.0.1 \
+  --ssh-target arad@jetson-nano.local  # 15 repeats each, one RPC session
+```
+
+When that file exists, `make eval TARGET=jetson_nano` also writes
+`retime_agreement.csv` and `retime_evaluation.csv`.
 
 ## Nano results (TEST, 752 schedules)
 
 `make eval TARGET=jetson_nano` produced these at commit `678e873` with a clean
-worktree; the files are in `results/jetson_nano/`. TRAIN (3,499 schedules)
+worktree, and the code at `d78acec` reproduces `evaluation.csv` and
+`paired_comparison.csv` byte for byte; the files are in `results/jetson_nano/`,
+and each one's `.meta.json` names the commit that wrote it. TRAIN (3,499 schedules)
 fitted the analytic constants and trained XGBoost, VALIDATION (749) selected
 the XGBoost settings (depth 6, learning rate 0.1, 300 trees for both feature
 sets), and TEST was used only for the numbers below. XGBoost rows score the
@@ -443,22 +470,24 @@ Other outputs:
   (0.83x). These are effective model constants, not measured rates. Fitting
   raises the analytic Spearman from 0.405 to 0.442 and leaves its top-1 ratio
   at 1.80.
-- **Analytic penalties** (`ablations.csv`): without the vector penalty the
-  fitted analytic model's Spearman falls from 0.442 to 0.136; removing the
-  parallel, cache, or register penalty changes it by 0.043 or less, although
-  without the cache penalty its top-1 ratio worsens from 1.80 to 5.46.
-- **Learning curve** (`learning_curve_summary.csv`; schedule + analytical
-  features, mean of five seeds): Spearman 0.796, 0.842, 0.893, 0.906, 0.926,
-  and 0.937 with 100, 250, 500, 1,000, 2,000, and 3,499 TRAIN schedules. The
-  top-1 ratio does not fall steadily (1.10–1.31).
+- **Analytic penalties** (`ablations.csv`, which now also holds the full
+  fitted and hand-set analytic rows): without the vector penalty the fitted
+  analytic model's Spearman falls from 0.442 to 0.136; removing the parallel,
+  cache, or register penalty changes it by 0.043 or less, although without the
+  cache penalty its top-1 ratio worsens from 1.80 to 5.46. See "Analytical
+  model diagnosis" below.
+- **Learning curve**: both feature sets, with the analytic constants refit on
+  each TRAIN subset; see "Final analyses" below.
 - **Draft then verify** (`draft_verify.csv`): when XGBoost with schedule
   features drafts 32 candidates and the hybrid model chooses among them, the
   choice reaches the hybrid's own top-1 ratio (1.071). Analytic drafts need 64
   candidates and random drafts 128 to reach it.
 - **Timing noise** (`noise_floor.csv`): the Spearman between the medians of
   repeats 1–2 and 3–5 of each TEST schedule is 0.994 overall but 0.579 within
-  the fastest decile (75 schedules), so rankings among the fastest schedules
-  are limited by timing noise as well as by the models.
+  the fastest decile (75 schedules). That split is confounded by warm-up; an
+  interleaved split and a second timing of TEST show that the fastest-decile
+  ranking is reproducible to about 0.95, so the models, not timing noise,
+  limit it. See "Noise ceiling and a second timing of TEST" below.
 - **Leakage check** (`shuffled_label_null.csv`): XGBoost trained on globally
   permuted TRAIN labels has mean TEST Spearman 0.003 (schedule features) and
   0.007 (+ analytical) over 20 permutations each, within two standard errors of
@@ -472,6 +501,156 @@ Other outputs:
 
 Figures: `results/jetson_nano/plots/overview.pdf` and
 `results/jetson_nano/plots/measured_vs_predicted.pdf`.
+
+## Final analyses
+
+The code at `d78acec` produced everything in this section (`make eval
+TARGET=apple_m2`, `make eval TARGET=jetson_nano`, then `make transfer`) from
+the collected data and the shared split, which are unchanged. Selection used
+VALIDATION only; TEST was used only for these numbers. Differences between two
+models are paired by training seed and use 2,000 paired TEST resamples; the
+same resamples serve every file of one target, so the full-TRAIN rows below
+equal `paired_comparison.csv`.
+
+### M2 with the same code
+
+`results/apple_m2/` holds the M2 pool evaluated on the same 752 TEST schedules
+(the older root-level `results/` snapshot is untouched). The TRAIN fit moves
+the M2 constants to 180.4 GFLOP/s and 94.7 GB/s (0.45x and 0.95x the starting
+values).
+
+| Scorer | Spearman | Fastest-decile Spearman | Top-10 recall in 30 | Top-1 latency ratio |
+|---|---|---|---|---|
+| Analytic, TRAIN-fitted constants | 0.484 [0.425, 0.537] | −0.050 | 0.00 | 1.75 |
+| XGBoost, schedule features | 0.894 [0.877, 0.911] | 0.071 | 0.40 | 1.62 |
+| XGBoost, schedule + analytical features | 0.903 [0.885, 0.919] | 0.235 | 0.70 | 1.45 |
+
+As on the Nano, adding the analytical features raises Spearman by a small
+amount whose interval excludes zero, +0.013 [+0.005, +0.022], while the
+changes near the top have intervals that reach zero: fastest-decile Spearman
++0.148 [−0.008, +0.281], top-10 recall +0.34 [0.00, +0.50], top-1 ratio
+−0.126 [−0.246, +0.131]. The M2 shuffled-label check flags one of its four
+global statistics: the hybrid's fastest-decile Spearman averages 0.078 over 20
+permutations, 2.4 standard errors from zero; the other three are within 1.2.
+
+### Learning curve, both feature sets
+
+Both models train on the same nested TRAIN subsets with the settings chosen on
+VALIDATION; the hybrid's analytic constants are refit on each subset alone
+(`constants.json`, `nested_train_constants`), so no subset model sees more
+labels than its size. Spearman, mean of five seeds (`learning_curve_summary.csv`,
+`learning_curve_paired.csv`):
+
+| TRAIN schedules | Nano, schedule | Nano, + analytical | Nano difference [95% CI] | M2, schedule | M2, + analytical | M2 difference [95% CI] |
+|---|---|---|---|---|---|---|
+| 100 | 0.798 | 0.791 | −0.007 [−0.020, +0.008] | 0.696 | 0.681 | −0.016 [−0.037, +0.005] |
+| 250 | 0.837 | 0.840 | +0.004 [−0.006, +0.014] | 0.773 | 0.781 | +0.008 [−0.006, +0.024] |
+| 500 | 0.880 | 0.891 | +0.011 [+0.003, +0.019] | 0.817 | 0.847 | +0.029 [+0.018, +0.042] |
+| 1,000 | 0.895 | 0.906 | +0.011 [+0.004, +0.019] | 0.840 | 0.868 | +0.029 [+0.017, +0.041] |
+| 2,000 | 0.916 | 0.926 | +0.010 [+0.005, +0.016] | 0.871 | 0.888 | +0.016 [+0.007, +0.026] |
+| 3,499 | 0.931 | 0.937 | +0.006 [+0.001, +0.012] | 0.889 | 0.902 | +0.013 [+0.005, +0.022] |
+
+The analytical features help once there are about 500 TRAIN schedules and
+not below. Near the top of the ranking the picture is mixed. On the Nano only
+two differences have intervals that exclude zero, both in the hybrid's favour:
+the top-1 ratio with 100 schedules (−0.322 [−0.574, −0.084]) and the top-5
+ratio with 2,000 (−0.162 [−0.264, −0.031]). On the M2 the hybrid gains
+fastest-decile Spearman with 1,000 and 2,000 schedules and top-10 recall with
+500 and 1,000.
+
+### Transfer from the M2 to the Nano
+
+`make transfer` scores four kinds of ranker on the Nano TEST set
+(`transfer_summary.csv`, `transfer_paired.csv`, `transfer_grid.json`):
+(a) the M2 models of `results/apple_m2/` unchanged; (b) the measured M2
+latency of the TEST schedules, a reference rather than a model; (c) XGBoost on
+the first 100–1,000 Nano TRAIN schedules; and (d) the same with the M2 model's
+predicted latency as one extra feature. Only M2 rows of TRAIN ids are trained
+on (0 VALIDATION or TEST ids), and the M2 feature of a Nano TRAIN row is an
+out-of-fold prediction (5 folds over M2 TRAIN, constants refit inside each
+fold), so a row's own M2 label never enters its feature. Settings for (c) and
+(d) are chosen per size on Nano VALIDATION; where they match the full-TRAIN
+choice, (c) reproduces the learning-curve models exactly.
+
+Without any Nano labels, the M2 models rank the Nano TEST set at Spearman
+0.853 [0.831, 0.872] (schedule features) and 0.869 [0.848, 0.885]
+(+ analytical), close to the measured M2 latency itself, 0.865 [0.842,
+0.884]. Spearman, mean of five seeds:
+
+| Nano TRAIN rows | (c) schedule | (d) schedule + M2 | Difference [95% CI] | (c) + analytical | (d) + analytical + M2 | Difference [95% CI] |
+|---|---|---|---|---|---|---|
+| 100 | 0.803 | 0.864 | +0.061 [+0.043, +0.080] | 0.791 | 0.872 | +0.081 [+0.064, +0.100] |
+| 250 | 0.855 | 0.886 | +0.030 [+0.018, +0.043] | 0.851 | 0.894 | +0.042 [+0.028, +0.056] |
+| 500 | 0.886 | 0.894 | +0.008 [−0.004, +0.019] | 0.898 | 0.902 | +0.004 [−0.006, +0.015] |
+| 1,000 | 0.895 | 0.905 | +0.010 [+0.002, +0.018] | 0.909 | 0.906 | −0.003 [−0.012, +0.005] |
+
+With the M2 prediction, 100 Nano schedules give a higher mean Spearman than
+250 without it (0.864 against 0.855 with schedule features, 0.872 against
+0.851 with analytical features); from 500 schedules on the gain is 0.01 or
+less. It does not help near the top: no fastest-decile, top-10 recall or
+top-5 difference between (d) and (c) excludes zero, and with schedule
+features it worsens the top-1 choice with 250 and 1,000 rows (+0.535
+[+0.045, +0.535] and +0.153 [+0.002, +0.354]).
+
+### Analytical model diagnosis
+
+- **Compute versus memory time** (`analytic_time_shares.csv`): with the
+  TRAIN-fitted constants, compute time is 94.8% of the median Nano TEST
+  schedule's predicted latency (10th–90th percentile 72.3%–98.9%) and 94.0%
+  on the M2 (67.0%–98.9%); memory time dominates for 2.7% and 3.3% of the
+  schedules.
+- **Penalty values** (`analytic_penalties.csv`; the same for hand-set and
+  fitted constants): the vector factor is 0.25 for 220 TEST schedules, 0.5 for
+  187 and 1 for 345; the parallel factor is 1 for 717 and the register factor
+  1 for 691. On the Nano the L1 cache factor is below 1 for 143 schedules (57
+  distinct values, down to 0.030) and the L2 factor is 0.667 for 40; on the M2
+  (128 KiB L1, 16 MiB L2) only 44 schedules get an L1 factor and none an L2
+  factor.
+- **Can the cache penalties change the ranking?** Yes on the Nano
+  (`analytic_cache_effect.csv`). They only lengthen memory time, but removing
+  them reorders 2.5% of all TEST pairs (Spearman 0.988 between the two
+  predictions), changes the predicted fastest schedule, keeps 2 of the
+  predicted top 10, and raises the fitted model's top-1 ratio from 1.80 to
+  5.46. On the M2 they reorder 0.25% of pairs and leave the top-1 choice
+  unchanged.
+
+### Noise ceiling and a second timing of TEST
+
+`noise_floor.csv` gives, per scope, the Spearman between the medians of two
+halves of every schedule's repeats, its Spearman-Brown full-length estimate
+2r/(1+r) (the expected Spearman between two independent full medians), and the
+square root of that, the expected Spearman of a noise-free predictor against
+the measured medians. The ordered split (repeats 1–2 against 3–5) is
+confounded by warm-up: the first two repeats are slower than the rest for 62%
+of the Nano TEST schedules (55% on the M2). Splitting odd- against
+even-numbered repeats avoids that. Nano TEST, Spearman-Brown estimates:
+
+| Scope | Ordered, all | Ordered, fastest decile | Interleaved, all | Interleaved, fastest decile | Fastest-decile ceiling (interleaved) |
+|---|---|---|---|---|---|
+| Pooled | 0.997 | 0.733 | 0.999 | 0.945 | 0.972 |
+| Sketch 0 | 0.996 | 0.490 | 0.999 | 0.922 | 0.960 |
+| Sketch 1 | 0.997 | 0.838 | 0.999 | 0.960 | 0.980 |
+| Sketch 2 | 0.997 | 0.876 | 0.999 | 0.994 | 0.997 |
+
+On the M2 the fastest-decile estimate is 0.844 with the ordered split and
+0.902 interleaved.
+
+`scripts/retime_nano_test.py` (commit `5f0f432`) timed all 752 TEST schedules
+again: 15 repeats each with the slow-skip shortcut off, in a seeded random
+order, in one new RPC session to the same server process (PID 18205) with its
+recorded environment. All 752 were `ok`; per-batch canary drift stayed between
++0.35% and +0.62%, the clock did not drop, and the inputs' checksums were
+unchanged. The re-timed medians agree with the collection's at Spearman 0.998
+overall and 0.953 within the fastest decile (0.950, 0.972, and 0.933 per
+sketch; `retime_agreement.csv`), although 21% of the schedules moved by more
+than 5% (median ratio 0.993, 10th–90th percentile 0.928–1.035). Against the
+re-timed medians (`retime_evaluation.csv`) every scorer keeps its place; the
+hybrid scores Spearman 0.939, fastest-decile 0.533, and top-1 ratio 1.065.
+The collection's medians remain the primary result.
+
+The fastest-decile ranking is therefore reproducible to about 0.95, far above
+the models' 0.41–0.50: near the top, the models are the limit, not timing
+noise.
 
 ## What is tested and what remains
 
@@ -497,7 +676,9 @@ replayed M2-pool schedules, all correct and timed with the M2 protocol; a
 20-schedule canary over five rounds and a second RPC session; and a NEON FMA
 peak check. The collection then measured all 5,000 M2-pool schedules; all
 passed the correctness check, and 34 exceeded the slow threshold and kept a
-single timing (`slow_skip`).
+single timing (`slow_skip`). A second timing of the 752 TEST schedules, with
+15 repeats each in one new RPC session, agreed with the collection at
+Spearman 0.998.
 
 **Existing M2 evidence:** the released M2 dataset and historical M2 result
 artifacts. These are not re-labeled or reinterpreted as Nano measurements.
@@ -525,7 +706,9 @@ remain diagnostic only; the Nano results come from the collection.
 5. Done: the Nano collection (`data/nano/`), the split derived from the M2
    split, training, and the TEST evaluation (`results/jetson_nano/`; see
    "Nano results"). Rerun with `make split TARGET=jetson_nano` and
-   `make eval TARGET=jetson_nano` from a clean worktree.
+   `make eval TARGET=jetson_nano` from a clean worktree. Also done: the
+   final analyses (`make eval TARGET=apple_m2`, `make transfer`, and the
+   TEST re-timing; see "Final analyses").
 
 ## Limitations and references
 
@@ -536,7 +719,10 @@ are not pinned (`schedutil` governor; `jetson_clocks` and the memory clock need
 root and were not read), and some schedules shift by a few percent between RPC
 sessions, so the collection ran in a single session. TEST was measured first
 and TRAIN last within one 2 h 41 min run; canary drift stayed below 1% in every
-batch. Analytical features are
+batch. In the second timing of TEST, 21% of the schedules moved by more than
+5% between the two sessions while their ranking held (Spearman 0.998). The
+first repeats of a schedule run slightly slow, so a split of the repeats in
+time order understates timing reliability. Analytical features are
 estimates and omit hardware counters. The current workload is only one FP32
 matrix size. Timing quality depends on device power, thermal, and scheduling
 conditions.
