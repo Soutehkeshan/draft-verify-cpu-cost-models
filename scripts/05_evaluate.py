@@ -18,14 +18,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.analysis import (
     REPORTED_METRICS,
+    discordant_pairs,
     paired_difference,
     resampled_metrics_parallel,
     seed_mean_interval,
+    value_distribution,
 )
 from dvcm.analytic import (
     AnalyticConstants,
     Penalties,
     constants_from_payload,
+    latency_components,
     latency_seconds,
 )
 from dvcm.config import (
@@ -561,6 +564,112 @@ def _write_shuffled_label_null(
         )
 
 
+def _write_analytic_diagnosis(
+    test, layouts, hand_set, fitted, y_true, scopes, provenance, results_dir
+):
+    """Compute/memory shares, penalty distributions and the cache penalties' ranking effect."""
+    constant_sets = (("fitted", fitted), ("hand_set", hand_set))
+    positions = [np.asarray(row.vector, dtype=float) for row in test.itertuples(index=False)]
+    sketch_layouts = [layouts[int(value)] for value in test["sketch_id"]]
+    parts = {
+        name: [
+            latency_components(position, layout, constants)
+            for position, layout in zip(positions, sketch_layouts)
+        ]
+        for name, constants in constant_sets
+    }
+    without_cache = {
+        name: np.asarray(
+            [
+                latency_seconds(position, layout, constants, Penalties(cache=False))
+                for position, layout in zip(positions, sketch_layouts)
+            ]
+        )
+        for name, constants in constant_sets
+    }
+    share_rows, penalty_rows, cache_rows = [], [], []
+    for scope, indexes in scopes:
+        truth = y_true[indexes]
+        for name, _ in constant_sets:
+            scoped = [parts[name][index] for index in indexes]
+            compute = np.asarray([item["compute_time_s"] for item in scoped])
+            memory = np.asarray([item["memory_time_s"] for item in scoped])
+            share = compute / (compute + memory)
+            share_rows.append(
+                {
+                    "scope": scope,
+                    "constants": name,
+                    "n_test": len(indexes),
+                    "compute_share_median": float(np.median(share)),
+                    "compute_share_p10": float(np.quantile(share, 0.10)),
+                    "compute_share_p90": float(np.quantile(share, 0.90)),
+                    "memory_share_median": float(np.median(1.0 - share)),
+                    "memory_share_p10": float(np.quantile(1.0 - share, 0.10)),
+                    "memory_share_p90": float(np.quantile(1.0 - share, 0.90)),
+                    "memory_dominated_fraction": float(np.mean(share < 0.5)),
+                    "compute_time_ms_median": float(np.median(compute) * 1000),
+                    "memory_time_ms_median": float(np.median(memory) * 1000),
+                    "memory_time_ms_max": float(np.max(memory) * 1000),
+                    "share_definition": "compute_time / (compute_time + memory_time) per TEST schedule",
+                }
+            )
+            full = compute + memory
+            reduced = without_cache[name][indexes]
+            discordant, pair_count = discordant_pairs(full, reduced)
+            increase = (full / reduced - 1.0) * 100.0
+            cache_l1 = np.asarray([item["penalty_cache_l1"] for item in scoped])
+            cache_l2 = np.asarray([item["penalty_cache_l2"] for item in scoped])
+            with_metrics = _metric_values(truth, full)
+            without_metrics = _metric_values(truth, reduced)
+            cache_rows.append(
+                {
+                    "scope": scope,
+                    "constants": name,
+                    "n_test": len(indexes),
+                    "schedules_with_l1_cache_penalty": int(np.sum(cache_l1 < 1.0)),
+                    "schedules_with_l2_cache_penalty": int(np.sum(cache_l2 < 1.0)),
+                    "predicted_latency_increase_pct_median": float(np.median(increase)),
+                    "predicted_latency_increase_pct_max": float(np.max(increase)),
+                    "spearman_with_vs_without_cache_penalty": spearman(full, reduced),
+                    "discordant_pairs": discordant,
+                    "pairs": pair_count,
+                    "discordant_pair_fraction": discordant / pair_count if pair_count else float("nan"),
+                    "same_predicted_top_1": bool(np.argmin(full) == np.argmin(reduced)),
+                    "predicted_top_10_overlap": len(
+                        set(np.argsort(full, kind="stable")[:10].tolist())
+                        & set(np.argsort(reduced, kind="stable")[:10].tolist())
+                    ),
+                    "measured_spearman_with_cache_penalty": with_metrics["spearman"],
+                    "measured_spearman_without_cache_penalty": without_metrics["spearman"],
+                    "measured_top_1_ratio_with_cache_penalty": with_metrics["top_1_latency_ratio"],
+                    "measured_top_1_ratio_without_cache_penalty": without_metrics["top_1_latency_ratio"],
+                    "cache_penalties_change_ranking": bool(discordant > 0),
+                }
+            )
+        scoped = [parts["fitted"][index] for index in indexes]
+        for factor, applies_to in (
+            ("penalty_vector", "compute_time"),
+            ("penalty_parallel", "compute_time"),
+            ("penalty_register", "compute_time"),
+            ("compute_penalty", "compute_time"),
+            ("penalty_cache_l1", "memory_time"),
+            ("penalty_cache_l2", "memory_time"),
+            ("memory_penalty", "memory_time"),
+        ):
+            penalty_rows.append(
+                {
+                    "scope": scope,
+                    "penalty": factor,
+                    "divides": applies_to,
+                    **value_distribution([item[factor] for item in scoped]),
+                    "note": "1.0 means no penalty; identical for hand-set and fitted constants",
+                }
+            )
+    write_csv(pd.DataFrame(share_rows), results_dir / "analytic_time_shares.csv", provenance)
+    write_csv(pd.DataFrame(penalty_rows), results_dir / "analytic_penalties.csv", provenance)
+    write_csv(pd.DataFrame(cache_rows), results_dir / "analytic_cache_effect.csv", provenance)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     add_target_argument(parser)
@@ -774,6 +883,12 @@ def main() -> None:
                 for row in test.itertuples(index=False)
             ]
         )
+    # The full analytic models reuse their evaluation.csv bootstrap seeds, so
+    # their rows here equal their rows there.
+    full_analytic = {
+        name: list(predictions).index(name)
+        for name in ("analytic(fitted)", "analytic(hand_set)")
+    }
     ablation_rows = []
     for scope_index, (scope, indexes) in enumerate(scopes):
         for model_index, (name, prediction) in enumerate(ablation_predictions.items()):
@@ -786,10 +901,36 @@ def main() -> None:
                     seed=500 + scope_index * 100 + model_index,
                 )
             )
+        for name, scorer_index in full_analytic.items():
+            ablation_rows.append(
+                _score_row(
+                    scope,
+                    name,
+                    y_true[indexes],
+                    predictions[name][indexes],
+                    seed=scope_index * 100 + scorer_index,
+                )
+            )
+    all_penalties = ("vector", "parallel", "cache", "register")
+    for row in ablation_rows:
+        name = row["scorer"]
+        removed = name.removeprefix("without_") if name.startswith("without_") else None
+        row["constants"] = (
+            "hand_set" if name == "analytic(hand_set)"
+            else "n/a" if name == "xgb_base_features"
+            else "fitted"
+        )
+        row["penalties_enabled"] = (
+            "n/a" if name == "xgb_base_features"
+            else ", ".join(penalty for penalty in all_penalties if penalty != removed)
+        )
     write_csv(
         pd.DataFrame(ablation_rows),
         results_dir / "ablations.csv",
         provenance,
+    )
+    _write_analytic_diagnosis(
+        test, layouts, hand_set, fitted, y_true, scopes, provenance, results_dir
     )
 
     noise_rows = []
