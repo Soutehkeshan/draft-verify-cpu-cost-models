@@ -116,8 +116,13 @@ def main() -> None:
     axes[1, 0].grid(True, alpha=0.25)
 
     canary_path = results_dir / "canary.csv"
+    canary_log_path = data_dir / "canary_log.parquet"  # Nano positions-replay collection
+    canary = None
     if canary_path.exists():
         canary = pd.read_csv(canary_path)
+    elif canary_log_path.exists():
+        canary = pd.read_parquet(canary_log_path)
+    if canary is not None:
         canary = canary[canary["status"].isin(("ok", "slow_skip"))]
         axes[1, 1].scatter(canary["batch_id"], canary["median_ms"], alpha=0.5)
         axes[1, 1].set_title("Canary drift")
