@@ -506,7 +506,8 @@ Figures: `results/jetson_nano/plots/overview.pdf` and
 
 The code at `d78acec` produced everything in this section (`make eval
 TARGET=apple_m2`, `make eval TARGET=jetson_nano`, then `make transfer`) from
-the collected data and the shared split, which are unchanged. Selection used
+the collected data and the shared split, which are unchanged; the
+120-permutation shuffled-label check comes from `5990b94`. Selection used
 VALIDATION only; TEST was used only for these numbers. Differences between two
 models are paired by training seed and use 2,000 paired TEST resamples; the
 same resamples serve every file of one target, so the full-TRAIN rows below
@@ -532,6 +533,12 @@ changes near the top have intervals that reach zero: fastest-decile Spearman
 −0.126 [−0.246, +0.131]. The M2 shuffled-label check flags one of its four
 global statistics: the hybrid's fastest-decile Spearman averages 0.078 over 20
 permutations, 2.4 standard errors from zero; the other three are within 1.2.
+Repeating the same check over 120 permutations
+(`scripts/check_shuffled_label_null.py`, whose first 20 reproduce
+`shuffled_label_null.csv`; `shuffled_label_null_extended_summary.csv`) gives
+0.006, 0.5 standard errors. Across both targets the largest of the eight
+120-permutation statistics is −2.25 standard errors (Nano, hybrid, fastest
+decile), negative, which is not the direction a leak would push it.
 
 ### Learning curve, both feature sets
 
@@ -551,12 +558,15 @@ labels than its size. Spearman, mean of five seeds (`learning_curve_summary.csv`
 | 3,499 | 0.931 | 0.937 | +0.006 [+0.001, +0.012] | 0.889 | 0.902 | +0.013 [+0.005, +0.022] |
 
 The analytical features help once there are about 500 TRAIN schedules and
-not below. Near the top of the ranking the picture is mixed. On the Nano only
-two differences have intervals that exclude zero, both in the hybrid's favour:
-the top-1 ratio with 100 schedules (−0.322 [−0.574, −0.084]) and the top-5
-ratio with 2,000 (−0.162 [−0.264, −0.031]). On the M2 the hybrid gains
-fastest-decile Spearman with 1,000 and 2,000 schedules and top-10 recall with
-500 and 1,000.
+not below. Near the top of the ranking there are 24 differences per target
+(fastest-decile Spearman, top-10 recall, top-1 and top-5 ratios at six
+sizes), and chance alone would put about 1.2 of them outside zero. The Nano
+has two, both in the hybrid's favour: the top-1 ratio with 100 schedules
+(−0.322 [−0.574, −0.084]) and the top-5 ratio with 2,000 (−0.162 [−0.264,
+−0.031]), which is what chance gives. The M2 has four, all in the hybrid's
+favour (fastest-decile Spearman with 1,000 and 2,000 schedules, top-10 recall
+with 500 and 1,000); that is more than chance alone, but neighbouring sizes
+share training rows and the TEST set, so it is weak evidence.
 
 ### Transfer from the M2 to the Nano
 
@@ -584,13 +594,16 @@ Without any Nano labels, the M2 models rank the Nano TEST set at Spearman
 | 500 | 0.886 | 0.894 | +0.008 [−0.004, +0.019] | 0.898 | 0.902 | +0.004 [−0.006, +0.015] |
 | 1,000 | 0.895 | 0.905 | +0.010 [+0.002, +0.018] | 0.909 | 0.906 | −0.003 [−0.012, +0.005] |
 
-With the M2 prediction, 100 Nano schedules give a higher mean Spearman than
-250 without it (0.864 against 0.855 with schedule features, 0.872 against
-0.851 with analytical features); from 500 schedules on the gain is 0.01 or
-less. It does not help near the top: no fastest-decile, top-10 recall or
-top-5 difference between (d) and (c) excludes zero, and with schedule
-features it worsens the top-1 choice with 250 and 1,000 rows (+0.535
-[+0.045, +0.535] and +0.153 [+0.002, +0.354]).
+With the M2 prediction, 100 Nano schedules roughly match 250 without it
+(mean Spearman 0.864 against 0.855 with schedule features, 0.872 against
+0.851 with analytical features; this comparison has no interval); from 500
+schedules on the gain is 0.01 or less. Near the top there is no reliable
+effect in either direction. Of the 32 pooled top-of-ranking differences
+between (d) and (c) (fastest-decile Spearman, top-10 recall, top-1 and top-5
+ratios at four sizes), 2 exclude zero, both against the M2 feature (the top-1
+choice with schedule features at 250 and 1,000 rows, +0.535 [+0.045, +0.535]
+and +0.153 [+0.002, +0.354]), where chance alone gives about 1.6; per sketch,
+3 of 96 exclude zero, all in its favour, against about 4.8 by chance.
 
 ### Analytical model diagnosis
 
