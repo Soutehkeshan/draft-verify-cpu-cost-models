@@ -157,6 +157,13 @@ another target.
 - `scripts/07_transfer.py`: M2-to-Nano transfer evaluation (`make transfer`).
 - `scripts/retime_nano_test.py`: a second timing of the Nano TEST schedules
   in one new RPC session.
+- `scripts/check_shuffled_label_null.py`: the global shuffled-label check
+  repeated over more permutations.
+- `scripts/make_report_tables.py` and `scripts/make_report_figures.py`: the
+  report's LaTeX tables and vector figures, written into `Report/tables/` and
+  `Report/figures/` from the result files (`make report`);
+  `scripts/check_report_numbers.py`: checks that every number in
+  `Report/*.tex` rounds from a value in the result files.
 - `tests/`: synthetic unit tests plus host TVM schedule/build smoke tests.
 
 The harness takes a target and postprocessor configuration rather than
