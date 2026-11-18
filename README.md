@@ -251,6 +251,27 @@ features) and 0.009 (+ analytical); fastest-decile Spearman −0.013 and
 −0.026. The largest, −2.25 standard errors, is negative, which is not the
 direction a leak would push it.
 
+## Confirmation study (v3.0, planned before any new timing)
+
+The original TEST set (752 schedules, so only ten "fastest ten") left the
+gains near the top of the ranking undecided. To settle them, 20,000 new
+schedules, none of them in the original pool, are drawn uniformly with seed 1
+by `scripts/sample_confirmation_pool.py`, timed on the Nano with the original
+protocol into `data/jetson_nano_confirm/`, and scored by
+`scripts/evaluate_confirmation.py` (`make confirm`). The models, settings and
+analytic constants are the ones fitted on the original TRAIN set; nothing is
+retrained or re-tuned.
+
+Fixed before the new timings: four primary gains from adding the analytical
+features at full TRAIN, namely overall Spearman, fastest-decile Spearman,
+top-1% recall in the model's top 3%, and the top-1 latency ratio. Each counts
+as confirmed only if its 95% paired range (2,000 resamples) lies on the better
+side of zero, and all four are reported whatever they show. Secondary: the
+gain at every TRAIN size, the draft test with the fastest 1% as targets, and
+the repeat-noise ceiling of the new timings. The schedules are timed in a
+random order, so if the run stops early, the ones timed so far are still a
+random sample and are analysed as they are.
+
 ## Running it
 
 Use the pinned dependencies on the development machine (not on the Nano):
