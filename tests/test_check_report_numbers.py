@@ -15,7 +15,7 @@ def _checker():
 
 
 TEXT = r"""Gain $+0.006$ [$-$0.002, +0.012] over 3,499 runs and 94.8\% at 12.3~GFLOP/s.
-See~\cite{chen2016xgboost} and Fig.~\ref{fig:2}; M2 and A57 hardware. % 999 is a comment
+See~\cite{chen2016xgboost} and Fig.~\ref{fig:2}; A57 and L2 hardware. % 999 is a comment
 \includegraphics[width=0.48\linewidth]{figures/learning_curve} \vspace{2mm}
 Spearman 0.41--0.50, repeats 1-2, and 3{,}499 in math.
 \begin{tabular}{lrr}\multicolumn{3}{c}{x}\\[2pt] \end{tabular}

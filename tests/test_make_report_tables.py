@@ -26,21 +26,22 @@ def test_numbers_use_a_math_minus_and_a_plus_only_for_differences():
     assert tables.interval(0.937, 0.923, 0.948, 3) == "0.937 [0.923, 0.948]"
 
 
-def _paired(scale):
+def _paired():
     metrics = ["spearman", "fastest_decile_spearman", "top_10_recall_in_30",
                "top_1_latency_ratio", "top_5_latency_ratio"]
-    rows = [{"scope": "pooled", "metric": m, "difference_mean_over_seeds": scale * (i + 1) / 100,
-             "paired_bootstrap_ci_low": scale * i / 100, "paired_bootstrap_ci_high": scale * (i + 2) / 100}
+    rows = [{"scope": "pooled", "metric": m, "base_mean_over_seeds": 0.9, "hybrid_mean_over_seeds": 0.91,
+             "difference_mean_over_seeds": (i + 1) / 100, "paired_bootstrap_ci_low": i / 100,
+             "paired_bootstrap_ci_high": (i + 2) / 100}
             for i, m in enumerate(metrics)]
-    rows.append({"scope": "sketch_0", "metric": "spearman", "difference_mean_over_seeds": 9.0,
-                 "paired_bootstrap_ci_low": 9.0, "paired_bootstrap_ci_high": 9.0})
+    rows.append({"scope": "sketch_0", "metric": "spearman", "base_mean_over_seeds": 9.0, "hybrid_mean_over_seeds": 9.0,
+                 "difference_mean_over_seeds": 9.0, "paired_bootstrap_ci_low": 9.0, "paired_bootstrap_ci_high": 9.0})
     return pd.DataFrame(rows)
 
 
-def test_paired_table_has_a_row_per_metric_and_a_column_per_target():
-    text = _tables().paired_table({"jetson_nano": _paired(1.0), "apple_m2": _paired(-1.0)})
+def test_paired_table_has_a_row_per_metric_with_both_models_and_the_difference():
+    text = _tables().paired_table(_paired())
     rows = [line for line in text.splitlines() if line.endswith(r"\\") and "&" in line]
-    assert rows[0] == r"Metric & Nano & M2 \\"
-    assert rows[1] == r"Spearman $\rho$ & +0.010 [0.000, +0.020] & $-$0.010 [0.000, $-$0.020] \\"
+    assert rows[0] == r"Metric & XGBoost & + analytical & Difference [95\% CI] \\"
+    assert rows[1] == r"Spearman $\rho$ & 0.900 & 0.910 & +0.010 [0.000, +0.020] \\"
     assert len(rows) == 6  # header + five metrics; per-sketch rows are not used
     assert "9.000" not in text

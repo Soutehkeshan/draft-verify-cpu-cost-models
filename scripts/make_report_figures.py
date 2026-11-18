@@ -3,8 +3,8 @@
 
 learning_curve.pdf: TEST Spearman of XGBoost with schedule features and with
 analytical features at every nested TRAIN size (mean of five seeds, 95%
-bootstrap band), above the seed-paired difference with its 95% interval;
-Nano left, M2 right. draft_recall.pdf: how many of the ten fastest TEST
+bootstrap band), above the seed-paired difference with its 95% interval.
+draft_recall.pdf: how many of the ten fastest TEST
 schedules fall inside a draft of K candidates for the XGBoost and analytic
 drafters, against the expectation for a random draft (10 K / n). Figures
 carry no titles (the captions do that); the PDF metadata names the sources
@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from dvcm.provenance import pdf_metadata
 
 COLUMN_WIDTH_IN = 3.45  # one column of the two-column template, about 250 pt
-TARGETS = (("jetson_nano", "Jetson Nano"), ("apple_m2", "Apple M2"))
+RESULTS = ROOT / "results" / "jetson_nano"
 SIZES = (100, 250, 500, 1000, 2000, 3499)
 SIZE_LABELS = ("100", "250", "500", "1k", "2k", "3.5k")
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#d9d8d4"
@@ -67,10 +67,6 @@ def expected_random_hits(k: int, n: int, top: int = 10) -> float:
     return top * min(k, n) / n
 
 
-def _panel_label(axis, text: str) -> None:
-    axis.text(0.03, 0.95, text, transform=axis.transAxes, ha="left", va="top", color=MUTED, fontsize=6.5)
-
-
 def _size_axis(axis) -> None:
     axis.set_xscale("log")
     axis.set_xlim(80, 4400)
@@ -80,73 +76,63 @@ def _size_axis(axis) -> None:
     axis.grid(True, color=GRID, linewidth=0.4)
 
 
-def learning_curve_figure(summaries: dict, paired: dict):
+def learning_curve_figure(summary: pd.DataFrame, paired: pd.DataFrame):
     with plt.rc_context(STYLE):
-        figure, axes = plt.subplots(2, 2, figsize=(COLUMN_WIDTH_IN, 2.85), sharex=True, sharey="row",
-                                    layout="constrained", gridspec_kw={"height_ratios": [1.6, 1.0]})
-        for column, (target, label) in enumerate(TARGETS):
-            top, bottom = axes[0, column], axes[1, column]
-            summary = summaries[target]
-            summary = summary[summary["scope"] == "pooled"]
-            for model in ("xgb(base)", "xgb(base+analytic)"):
-                color, line, marker, name = SERIES[model]
-                rows = summary[summary["model"] == model].sort_values("train_size")
-                top.fill_between(rows["train_size"], rows["spearman_bootstrap95_low"],
-                                 rows["spearman_bootstrap95_high"], color=color, alpha=0.16, linewidth=0)
-                top.plot(rows["train_size"], rows["spearman_mean"], color=color, linestyle=line, marker=marker,
-                         markersize=3.2, markeredgecolor=MUTED, markeredgewidth=0.4, label=name)
-            differences = paired[target]
-            differences = differences[(differences["scope"] == "pooled") & (differences["metric"] == "spearman")]
-            differences = differences.sort_values("train_size")
-            bottom.axhline(0.0, color=MUTED, linewidth=0.6)
-            for row in differences.itertuples(index=False):
-                excludes_zero = row.paired_bootstrap_ci_low > 0 or row.paired_bootstrap_ci_high < 0
-                bottom.errorbar(row.train_size, row.difference_mean_over_seeds,
-                                yerr=[[row.difference_mean_over_seeds - row.paired_bootstrap_ci_low],
-                                      [row.paired_bootstrap_ci_high - row.difference_mean_over_seeds]],
-                                fmt="o", markersize=3.2, color=INK, ecolor=MUTED, elinewidth=0.7, capsize=1.6,
-                                markerfacecolor=INK if excludes_zero else "white", markeredgewidth=0.6)
-            for axis in (top, bottom):
-                _size_axis(axis)
-            _panel_label(top, label)
-            bottom.set_xlabel("TRAIN schedules")
-        axes[0, 0].set_ylabel(r"Spearman $\rho$")
-        axes[1, 0].set_ylabel("Difference")
-        axes[1, 0].yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.02))
-        axes[1, 0].yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.2f"))
-        figure.align_ylabels(axes[:, 0])
-        handles, labels = axes[0, 0].get_legend_handles_labels()
+        figure, (top, bottom) = plt.subplots(2, 1, figsize=(COLUMN_WIDTH_IN, 2.6), sharex=True,
+                                             layout="constrained", gridspec_kw={"height_ratios": [1.6, 1.0]})
+        summary = summary[summary["scope"] == "pooled"]
+        for model in ("xgb(base)", "xgb(base+analytic)"):
+            color, line, marker, name = SERIES[model]
+            rows = summary[summary["model"] == model].sort_values("train_size")
+            top.fill_between(rows["train_size"], rows["spearman_bootstrap95_low"],
+                             rows["spearman_bootstrap95_high"], color=color, alpha=0.16, linewidth=0)
+            top.plot(rows["train_size"], rows["spearman_mean"], color=color, linestyle=line, marker=marker,
+                     markersize=3.2, markeredgecolor=MUTED, markeredgewidth=0.4, label=name)
+        differences = paired[(paired["scope"] == "pooled") & (paired["metric"] == "spearman")]
+        bottom.axhline(0.0, color=MUTED, linewidth=0.6)
+        for row in differences.sort_values("train_size").itertuples(index=False):
+            excludes_zero = row.paired_bootstrap_ci_low > 0 or row.paired_bootstrap_ci_high < 0
+            bottom.errorbar(row.train_size, row.difference_mean_over_seeds,
+                            yerr=[[row.difference_mean_over_seeds - row.paired_bootstrap_ci_low],
+                                  [row.paired_bootstrap_ci_high - row.difference_mean_over_seeds]],
+                            fmt="o", markersize=3.2, color=INK, ecolor=MUTED, elinewidth=0.7, capsize=1.6,
+                            markerfacecolor=INK if excludes_zero else "white", markeredgewidth=0.6)
+        for axis in (top, bottom):
+            _size_axis(axis)
+        bottom.set_xlabel("TRAIN schedules")
+        top.set_ylabel(r"Spearman $\rho$")
+        bottom.set_ylabel("Difference")
+        bottom.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.01))
+        bottom.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.2f"))
+        figure.align_ylabels([top, bottom])
+        handles, labels = top.get_legend_handles_labels()
         figure.legend(handles, labels, loc="outside upper center", ncol=2, frameon=False, handlelength=2.2)
     return figure
 
 
-def draft_recall_figure(drafts: dict):
+def draft_recall_figure(drafts: pd.DataFrame):
     with plt.rc_context(STYLE):
-        figure, axes = plt.subplots(1, 2, figsize=(COLUMN_WIDTH_IN, 1.7), sharey=True, layout="constrained")
-        for axis, (target, label) in zip(axes, TARGETS):
-            frame = drafts[target]
-            frame = frame[frame["scope"] == "pooled"]
-            for method in ("xgb_base", "analytic_fitted"):
-                color, line, marker, name = SERIES["xgb(base)" if method == "xgb_base" else method]
-                rows = frame[frame["draft_method"] == method].sort_values("K")
-                axis.plot(rows["K"], rows["draft_recall_at_K_top_10_count"], color=color, linestyle=line,
-                          marker=marker, markersize=3.4, markeredgecolor=MUTED, markeredgewidth=0.4,
-                          label=name)
-            sizes = sorted(frame["K"].unique())
-            n_test = int(frame["n_test"].iloc[0])
-            axis.plot(sizes, [expected_random_hits(k, n_test) for k in sizes], color=MUTED, linestyle=":",
-                      linewidth=1.0, label="Random (expected)")
-            axis.set_xscale("log", base=2)
-            axis.set_xticks(sizes)
-            axis.set_xticklabels([str(k) for k in sizes])
-            axis.minorticks_off()
-            axis.set_ylim(-0.4, 10.6)
-            axis.set_yticks([0, 2, 4, 6, 8, 10])
-            axis.grid(True, color=GRID, linewidth=0.4)
-            axis.set_xlabel("Draft size $K$")
-            _panel_label(axis, label)
-        axes[0].set_ylabel("Fastest 10 in draft")
-        handles, labels = axes[0].get_legend_handles_labels()
+        figure, axis = plt.subplots(figsize=(COLUMN_WIDTH_IN, 1.75), layout="constrained")
+        frame = drafts[drafts["scope"] == "pooled"]
+        for method in ("xgb_base", "analytic_fitted"):
+            color, line, marker, name = SERIES["xgb(base)" if method == "xgb_base" else method]
+            rows = frame[frame["draft_method"] == method].sort_values("K")
+            axis.plot(rows["K"], rows["draft_recall_at_K_top_10_count"], color=color, linestyle=line,
+                      marker=marker, markersize=3.4, markeredgecolor=MUTED, markeredgewidth=0.4, label=name)
+        sizes = sorted(frame["K"].unique())
+        n_test = int(frame["n_test"].iloc[0])
+        axis.plot(sizes, [expected_random_hits(k, n_test) for k in sizes], color=MUTED, linestyle=":",
+                  linewidth=1.0, label="Random (expected)")
+        axis.set_xscale("log", base=2)
+        axis.set_xticks(sizes)
+        axis.set_xticklabels([str(k) for k in sizes])
+        axis.minorticks_off()
+        axis.set_ylim(-0.4, 10.6)
+        axis.set_yticks([0, 2, 4, 6, 8, 10])
+        axis.grid(True, color=GRID, linewidth=0.4)
+        axis.set_xlabel("Draft size $K$")
+        axis.set_ylabel("Fastest 10 in draft")
+        handles, labels = axis.get_legend_handles_labels()
         figure.legend(handles, labels, loc="outside upper center", ncol=3, frameon=False, handlelength=2.2,
                       columnspacing=1.2)
     return figure
@@ -182,19 +168,13 @@ def main() -> None:
     args = parser.parse_args()
     out = args.report_dir.resolve() / "figures"
     out.mkdir(parents=True, exist_ok=True)
-    results = {target: ROOT / "results" / target for target, _ in TARGETS}
 
-    def read(target: str, name: str) -> pd.DataFrame:
-        return pd.read_csv(results[target] / name)
+    def read(name: str) -> pd.DataFrame:
+        return pd.read_csv(RESULTS / name)
 
-    _save(
-        learning_curve_figure({t: read(t, "learning_curve_summary.csv") for t, _ in TARGETS},
-                              {t: read(t, "learning_curve_paired.csv") for t, _ in TARGETS}),
-        out / "learning_curve.pdf",
-        [results[t] / name for t, _ in TARGETS for name in ("learning_curve_summary.csv", "learning_curve_paired.csv")],
-    )
-    _save(draft_recall_figure({t: read(t, "draft_verify.csv") for t, _ in TARGETS}),
-          out / "draft_recall.pdf", [results[t] / "draft_verify.csv" for t, _ in TARGETS])
+    _save(learning_curve_figure(read("learning_curve_summary.csv"), read("learning_curve_paired.csv")),
+          out / "learning_curve.pdf", [RESULTS / "learning_curve_summary.csv", RESULTS / "learning_curve_paired.csv"])
+    _save(draft_recall_figure(read("draft_verify.csv")), out / "draft_recall.pdf", [RESULTS / "draft_verify.csv"])
 
 
 if __name__ == "__main__":

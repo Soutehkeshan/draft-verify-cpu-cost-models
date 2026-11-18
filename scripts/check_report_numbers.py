@@ -8,11 +8,11 @@ divided by 1e9, MHz with a kHz value divided by 1e3, and KiB and MiB with a
 byte count divided by 1024 and 1024^2. A plain integer must equal a value
 exactly. Comments, citations, references, labels, URLs, file names, lengths,
 tabular column specifications and affiliations are not checked, and neither
-are digits inside names such as M2 or A57.
+are digits inside names such as A57.
 
-Sources: every CSV and JSON file in results/apple_m2 and results/jetson_nano
-(models/ excluded), the run, collection and re-timing metadata and the
-collection report in data/, the profiles in configs/, and the sizes of the
+Sources: every CSV and JSON file in results/jetson_nano (models/ excluded),
+the run, collection and re-timing metadata and the collection report in
+data/jetson_nano/, the profiles in configs/, and the sizes of the
 split lists. Every .tex file under Report/ is checked, tables included.
 Prints each mismatch as path:line and exits 1 if there is any.
 """
@@ -71,8 +71,6 @@ SOURCE_TOKENS = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])")
 # quotes only as means, and that would let a mistyped mean match by chance.
 PER_SEED_FILES = {
     "learning_curve.csv",
-    "transfer_seeds.csv",
-    "feature_comparison_seeds.csv",
     "shuffled_label_null_extended.csv",
 }
 
@@ -161,7 +159,7 @@ def extract_numbers(text: str) -> list[Found]:
         if sign in ("+", "-") and start > 0 and re.match(r"[\w)}\]]", masked[start - 1]):
             sign, start = "", match.start("int")  # a hyphen between words or a range
         if not sign and start > 0 and re.match(r"[\w.\\]", masked[start - 1]):
-            continue  # digits inside a name (M2, A57, sketch_0) or a decimal tail
+            continue  # digits inside a name (A57, sketch_0) or a decimal tail
         end = match.end()
         if end < len(masked) and re.match(r"\w", masked[end]):
             continue  # a number glued to letters: a length, a unit or a hash
@@ -234,37 +232,36 @@ def _walk(node, prefix: str, out: list) -> None:
 
 def load_sources(root: Path = ROOT, include_per_seed: bool = False) -> Sources:
     values: list[tuple[float, str]] = []
-    for target in ("apple_m2", "jetson_nano"):
-        directory = root / "results" / target
-        for path in sorted(directory.glob("*.csv")):
-            if path.name in PER_SEED_FILES and not include_per_seed:
-                continue
-            frame = pd.read_csv(path)
-            name = path.relative_to(root).as_posix()
-            for column in frame.columns:
-                series = frame[column]
-                if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-                    values.extend((float(v), f"{name}:{column}") for v in series.dropna())
-                else:
-                    for cell in series.dropna().astype(str):
-                        values.extend((float(t), f"{name}:{column}") for t in SOURCE_TOKENS.findall(cell))
-        for path in sorted(directory.glob("*.json")):
-            _walk(json.loads(path.read_text(encoding="utf-8")), path.relative_to(root).as_posix(), values)
-    for name in ("data/run_meta.json", "data/nano/run_meta.json", "data/nano/test_retime_meta.json"):
+    directory = root / "results" / "jetson_nano"
+    for path in sorted(directory.glob("*.csv")):
+        if path.name in PER_SEED_FILES and not include_per_seed:
+            continue
+        frame = pd.read_csv(path)
+        name = path.relative_to(root).as_posix()
+        for column in frame.columns:
+            series = frame[column]
+            if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+                values.extend((float(v), f"{name}:{column}") for v in series.dropna())
+            else:
+                for cell in series.dropna().astype(str):
+                    values.extend((float(t), f"{name}:{column}") for t in SOURCE_TOKENS.findall(cell))
+    for path in sorted(directory.glob("*.json")):
+        _walk(json.loads(path.read_text(encoding="utf-8")), path.relative_to(root).as_posix(), values)
+    for name in ("data/jetson_nano/run_meta.json", "data/jetson_nano/test_retime_meta.json"):
         path = root / name
         if path.is_file():
             _walk(json.loads(path.read_text(encoding="utf-8")), name, values)
-    for name in ("data/nano/collection_batches.jsonl", "data/nano/test_retime_batches.jsonl"):
+    for name in ("data/jetson_nano/collection_batches.jsonl", "data/jetson_nano/test_retime_batches.jsonl"):
         path = root / name
         if path.is_file():
             for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
                 _walk(json.loads(line), f"{name}[{index}]", values)
-    report = root / "data" / "nano" / "collection_report.md"
+    report = root / "data" / "jetson_nano" / "collection_report.md"
     if report.is_file():
         values.extend((float(t), report.relative_to(root).as_posix()) for t in SOURCE_TOKENS.findall(report.read_text()))
     for path in sorted((root / "configs").glob("*/*.json")):
         _walk(json.loads(path.read_text(encoding="utf-8")), path.relative_to(root).as_posix(), values)
-    for name in ("data/splits.json", "data/nano/splits.json"):
+    for name in ("data/jetson_nano/splits.json",):
         path = root / name
         if path.is_file():
             splits = json.loads(path.read_text(encoding="utf-8"))

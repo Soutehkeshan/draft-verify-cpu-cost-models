@@ -47,10 +47,9 @@ def test_figures_have_no_titles_and_no_raster_images(which):
     figures = _figures()
     summary, paired = _learning()
     if which == "learning":
-        figure = figures.learning_curve_figure({"jetson_nano": summary, "apple_m2": summary},
-                                               {"jetson_nano": paired, "apple_m2": paired})
+        figure = figures.learning_curve_figure(summary, paired)
     else:
-        figure = figures.draft_recall_figure({"jetson_nano": _draft(), "apple_m2": _draft()})
+        figure = figures.draft_recall_figure(_draft())
     assert figure._suptitle is None
     assert all(axis.get_title() == "" for axis in figure.axes)
     assert figure.get_figwidth() == pytest.approx(figures.COLUMN_WIDTH_IN)

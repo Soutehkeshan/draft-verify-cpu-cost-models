@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Write the report's LaTeX tables from the result files.
 
-Reads results/jetson_nano and results/apple_m2 and writes four tabulars to
-Report/tables/: main.tex (the five scorers on TEST), paired.tex (hybrid minus
-base, seed-paired), ablation.tex (the fitted analytic model with each penalty
-removed) and transfer.tex (M2 to Nano). Values are copied and rounded, never
-recomputed or typed. XGBoost rows are means over the five training seeds
-(learning_curve_summary.csv at full TRAIN, 2,000 TEST resamples); analytic and
-random rows come from evaluation.csv. Each file starts with a comment naming
-its sources and the commits that produced them; the floats, captions and
-font size stay in the report's .tex.
+Reads results/jetson_nano and writes three tabulars to Report/tables/: main.tex
+(the five scorers on TEST), paired.tex (XGBoost with and without the analytical
+features, seed-paired) and ablation.tex (the fitted analytic model with each
+penalty removed). Values are copied and rounded, never recomputed or typed.
+XGBoost rows are means over the five training seeds (learning_curve_summary.csv
+at full TRAIN, 2,000 TEST resamples); analytic and random rows come from
+evaluation.csv. Each file starts with a comment naming its sources and the
+commits that produced them; the floats, captions and font size stay in the
+report's .tex.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = (("Nano", "jetson_nano"), ("M2", "apple_m2"))
+RESULTS = ROOT / "results" / "jetson_nano"
 SCORERS = (
     ("random", "Random"),
     ("analytic(hand_set)", "Analytic, hand-set"),
@@ -37,7 +37,7 @@ MAIN_METRICS = (
 )
 PAIRED_METRICS = (
     ("spearman", r"Spearman $\rho$", 3),
-    ("fastest_decile_spearman", "Fastest decile", 3),
+    ("fastest_decile_spearman", r"Fastest-decile $\rho$", 3),
     ("top_10_recall_in_30", "Top-10 in 30", 2),
     ("top_1_latency_ratio", "Top-1 ratio", 3),
     ("top_5_latency_ratio", "Top-5 ratio", 3),
@@ -49,7 +49,6 @@ ABLATIONS = (
     ("without_cache", "No cache"),
     ("without_register", "No register"),
 )
-TRANSFER_SIZES = (100, 250, 500, 1000)
 
 
 def num(value: float, digits: int, signed: bool = False) -> str:
@@ -67,101 +66,62 @@ def interval(value: float, low: float, high: float, digits: int, signed: bool = 
     return f"{num(value, digits, signed)} [{num(low, digits, signed)}, {num(high, digits, signed)}]"
 
 
-def main_table(evaluation: dict, learning: dict) -> str:
+def main_table(evaluation: pd.DataFrame, learning: pd.DataFrame) -> str:
     lines = [
-        r"\begin{tabular}{llcccc}",
+        r"\begin{tabular}{lcccc}",
         r"\hline",
-        r"& Scorer & Spearman $\rho$ & Fastest-decile $\rho$ & Top-10 recall in 30 & Top-5 latency ratio \\",
+        r"Scorer & Spearman $\rho$ & Fastest-decile $\rho$ & Top-10 recall in 30 & Top-5 latency ratio \\",
         r"\hline",
     ]
-    for label, target in TARGETS:
-        scores = evaluation[target]
-        scores = scores[scores["scope"] == "pooled"].set_index("scorer")
-        seeds = learning[target]
-        seeds = seeds[(seeds["scope"] == "pooled") & (seeds["subset"].astype(str) == "all")].set_index("model")
-        for index, (scorer, name) in enumerate(SCORERS):
-            cells = []
-            for metric, digits, low, high in MAIN_METRICS:
-                if scorer.startswith("xgb"):
-                    row = seeds.loc[scorer]
-                    cells.append(interval(row[f"{metric}_mean"], row[f"{metric}_bootstrap95_low"],
-                                          row[f"{metric}_bootstrap95_high"], digits))
-                else:
-                    row = scores.loc[scorer]
-                    cells.append(interval(row[metric], row[low], row[high], digits))
-            lines.append(f"{label if index == 0 else ''} & {name} & " + " & ".join(cells) + r" \\")
-        lines.append(r"\hline")
-    lines.append(r"\end{tabular}")
+    scores = evaluation[evaluation["scope"] == "pooled"].set_index("scorer")
+    seeds = learning[(learning["scope"] == "pooled") & (learning["subset"].astype(str) == "all")].set_index("model")
+    for scorer, name in SCORERS:
+        cells = []
+        for metric, digits, low, high in MAIN_METRICS:
+            if scorer.startswith("xgb"):
+                row = seeds.loc[scorer]
+                cells.append(interval(row[f"{metric}_mean"], row[f"{metric}_bootstrap95_low"],
+                                      row[f"{metric}_bootstrap95_high"], digits))
+            else:
+                row = scores.loc[scorer]
+                cells.append(interval(row[metric], row[low], row[high], digits))
+        lines.append(f"{name} & " + " & ".join(cells) + r" \\")
+    lines += [r"\hline", r"\end{tabular}"]
     return "\n".join(lines) + "\n"
 
 
-def paired_table(paired: dict) -> str:
-    lines = [r"\begin{tabular}{@{}lcc@{}}", r"\hline", r"Metric & Nano & M2 \\", r"\hline"]
+def paired_table(paired: pd.DataFrame) -> str:
+    lines = [
+        r"\begin{tabular}{@{}lccc@{}}",
+        r"\hline",
+        r"Metric & XGBoost & + analytical & Difference [95\% CI] \\",
+        r"\hline",
+    ]
+    pooled = paired[paired["scope"] == "pooled"].set_index("metric")
     for metric, label, digits in PAIRED_METRICS:
-        cells = []
-        for _, target in TARGETS:
-            frame = paired[target]
-            row = frame[(frame["scope"] == "pooled") & (frame["metric"] == metric)].iloc[0]
-            cells.append(interval(row["difference_mean_over_seeds"], row["paired_bootstrap_ci_low"],
-                                  row["paired_bootstrap_ci_high"], digits, signed=True))
-        lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+        row = pooled.loc[metric]
+        lines.append(
+            f"{label} & {num(row['base_mean_over_seeds'], digits)} & {num(row['hybrid_mean_over_seeds'], digits)} & "
+            + interval(row["difference_mean_over_seeds"], row["paired_bootstrap_ci_low"],
+                       row["paired_bootstrap_ci_high"], digits, signed=True)
+            + r" \\"
+        )
     lines += [r"\hline", r"\end{tabular}"]
     return "\n".join(lines) + "\n"
 
 
-def ablation_table(ablations: dict) -> str:
+def ablation_table(ablations: pd.DataFrame) -> str:
     lines = [
-        r"\begin{tabular}{@{}lcccc@{}}",
+        r"\begin{tabular}{@{}lccc@{}}",
         r"\hline",
-        r"& \multicolumn{2}{c}{Nano} & \multicolumn{2}{c}{M2} \\",
-        r"Analytic model & $\rho$ & Top-5 & $\rho$ & Top-5 \\",
+        r"Analytic model & $\rho$ & Top-1 & Top-5 \\",
         r"\hline",
     ]
+    pooled = ablations[ablations["scope"] == "pooled"].set_index("scorer")
     for scorer, label in ABLATIONS:
-        cells = []
-        for _, target in TARGETS:
-            frame = ablations[target]
-            row = frame[(frame["scope"] == "pooled") & (frame["scorer"] == scorer)].iloc[0]
-            cells += [num(row["spearman"], 3), num(row["top_5_latency_ratio"], 3)]
+        row = pooled.loc[scorer]
+        cells = [num(row["spearman"], 3), num(row["top_1_latency_ratio"], 2), num(row["top_5_latency_ratio"], 3)]
         lines.append(f"{label} & " + " & ".join(cells) + r" \\")
-    lines += [r"\hline", r"\end{tabular}"]
-    return "\n".join(lines) + "\n"
-
-
-def transfer_table(summary: pd.DataFrame, paired: pd.DataFrame) -> str:
-    pooled = summary[summary["scope"] == "pooled"]
-    differences = paired[(paired["scope"] == "pooled") & (paired["metric"] == "spearman")]
-
-    def row(variant: str, feature_set: str, rows: int):
-        return pooled[(pooled["variant"] == variant) & (pooled["feature_set"] == feature_set)
-                      & (pooled["nano_train_rows"] == rows)].iloc[0]
-
-    def spearman(entry) -> str:
-        return interval(entry["spearman_mean"], entry["spearman_bootstrap95_low"], entry["spearman_bootstrap95_high"], 3)
-
-    lines = [
-        r"\begin{tabular}{lcccccc}",
-        r"\hline",
-        r"& \multicolumn{3}{c}{Schedule features} & \multicolumn{3}{c}{Schedule + analytical features} \\",
-        r"Nano TRAIN schedules & (c) & (d) & (d) $-$ (c) [95\% CI] & (c) & (d) & (d) $-$ (c) [95\% CI] \\",
-        r"\hline",
-        r"(a) M2 model, no Nano labels & \multicolumn{3}{c}{" + spearman(row("a_zero_shot", "base", 0))
-        + r"} & \multicolumn{3}{c}{" + spearman(row("a_zero_shot", "base_analytic", 0)) + r"} \\",
-        r"(b) Measured M2 latency & \multicolumn{6}{c}{" + spearman(row("b_m2_measured", "none", 0)) + r"} \\",
-        r"\hline",
-    ]
-    for size in TRANSFER_SIZES:
-        cells = [f"{size:,}"]
-        for feature_set in ("base", "base_analytic"):
-            difference = differences[(differences["feature_set"] == feature_set)
-                                     & (differences["nano_train_rows"] == size)].iloc[0]
-            cells += [
-                num(row("c_nano_only", feature_set, size)["spearman_mean"], 3),
-                num(row("d_adapted", feature_set, size)["spearman_mean"], 3),
-                interval(difference["difference_mean_over_seeds"], difference["paired_bootstrap_ci_low"],
-                         difference["paired_bootstrap_ci_high"], 3, signed=True),
-            ]
-        lines.append(" & ".join(cells) + r" \\")
     lines += [r"\hline", r"\end{tabular}"]
     return "\n".join(lines) + "\n"
 
@@ -190,27 +150,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--report-dir", type=Path, default=ROOT / "Report")
     args = parser.parse_args()
-    results = {target: ROOT / "results" / target for _, target in TARGETS}
     out = args.report_dir.resolve() / "tables"
     out.mkdir(parents=True, exist_ok=True)
 
-    def read(target: str, name: str) -> pd.DataFrame:
-        return pd.read_csv(results[target] / name)
+    def read(name: str) -> pd.DataFrame:
+        return pd.read_csv(RESULTS / name)
 
-    def paths(*names: str) -> list[Path]:
-        return [results[target] / name for _, target in TARGETS for name in names]
-
-    write_table(out / "main.tex",
-                main_table({t: read(t, "evaluation.csv") for _, t in TARGETS},
-                           {t: read(t, "learning_curve_summary.csv") for _, t in TARGETS}),
-                paths("evaluation.csv", "learning_curve_summary.csv"))
-    write_table(out / "paired.tex", paired_table({t: read(t, "paired_comparison.csv") for _, t in TARGETS}),
-                paths("paired_comparison.csv"))
-    write_table(out / "ablation.tex", ablation_table({t: read(t, "ablations.csv") for _, t in TARGETS}),
-                paths("ablations.csv"))
-    write_table(out / "transfer.tex",
-                transfer_table(read("jetson_nano", "transfer_summary.csv"), read("jetson_nano", "transfer_paired.csv")),
-                [results["jetson_nano"] / "transfer_summary.csv", results["jetson_nano"] / "transfer_paired.csv"])
+    write_table(out / "main.tex", main_table(read("evaluation.csv"), read("learning_curve_summary.csv")),
+                [RESULTS / "evaluation.csv", RESULTS / "learning_curve_summary.csv"])
+    write_table(out / "paired.tex", paired_table(read("paired_comparison.csv")), [RESULTS / "paired_comparison.csv"])
+    write_table(out / "ablation.tex", ablation_table(read("ablations.csv")), [RESULTS / "ablations.csv"])
 
 
 if __name__ == "__main__":
