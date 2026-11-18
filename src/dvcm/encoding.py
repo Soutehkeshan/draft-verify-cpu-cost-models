@@ -14,47 +14,6 @@ import math
 
 import numpy as np
 
-TOTAL_EXP = 9          # 512 = 2**9; derive from the loop extent, don't hard-code later
-MAX_INNER_EXP = 5      # max_innermost_factor = 32 = 2**5; read from the trace instead
-NUM_UNROLL = 4         # candidates in the SampleCategorical instruction
-
-# Default slices for the current workload. Actual layouts are derived from traces.
-I_SLICE = slice(0, 4)
-J_SLICE = slice(4, 8)
-K_SLICE = slice(8, 10)
-UNROLL_IDX = 10
-DIM = 11
-_DEFAULT_LAYOUT_CACHE = None
-
-
-def _default_layout():
-    """The current 512x512 matmul layout, used when no trace is supplied."""
-    tiles = []
-    for tile_slice in (I_SLICE, J_SLICE, K_SLICE):
-        n = tile_slice.stop - tile_slice.start
-        tiles.append({
-            "inst": None,
-            "n": n,
-            "extent": 2**TOTAL_EXP,
-            "total_exp": TOTAL_EXP,
-            "max_inner_factor": 2**MAX_INNER_EXP,
-            "max_inner_exp": MAX_INNER_EXP,
-            "slice": tile_slice,
-            "valid_exponents": _valid_tile_exponents(n, TOTAL_EXP, MAX_INNER_EXP),
-        })
-    return {
-        "tiles": tiles,
-        "categoricals": [{"inst": None, "candidates": tuple(range(NUM_UNROLL)), "index": UNROLL_IDX}],
-        "dim": DIM,
-    }
-
-
-def _get_default_layout():
-    """Build and cache the current workload's default layout once."""
-    global _DEFAULT_LAYOUT_CACHE
-    if _DEFAULT_LAYOUT_CACHE is None:
-        _DEFAULT_LAYOUT_CACHE = _default_layout()
-    return _DEFAULT_LAYOUT_CACHE
 
 
 def _sampling_instructions(trace):
@@ -167,77 +126,45 @@ def describe_space(design_space_trace):
     }
 
 
-def repair_tile(exps, total=TOTAL_EXP, max_inner=MAX_INNER_EXP):
-    """Map one loop's continuous exponents to the NEAREST valid integer tiling.
-
-    Valid = non-negative integers, sum == total, last <= max_inner.
-
-    Projects onto the bounded integer simplex by minimizing squared distance from
-    the clipped exponents. Ties are resolved by choosing the first coordinate.
-    """
-    values = np.asarray(exps, dtype=float)
-    if values.ndim != 1 or values.size == 0:
-        raise ValueError("exps must be a non-empty one-dimensional sequence")
-    if total < 0 or max_inner < 0:
-        raise ValueError("total and max_inner must be non-negative")
-    if not np.all(np.isfinite(values)):
-        raise ValueError("exps must contain only finite values")
-
-    target = np.clip(values, 0, total)
-    target[-1] = min(target[-1], max_inner)
-    result = np.rint(target).astype(int)
-    limits = np.full(result.size, total, dtype=int)
-    limits[-1] = min(total, max_inner)
-    result = np.minimum(result, limits)
-
-    while result.sum() < total:
-        available = np.flatnonzero(result < limits)
-        if available.size == 0:
-            raise ValueError("No valid tiling satisfies the requested total and bounds")
-        # Adding a unit where target-result is largest minimizes squared error.
-        idx = available[np.argmax(target[available] - result[available])]
-        result[idx] += 1
-    while result.sum() > total:
-        available = np.flatnonzero(result > 0)
-        # Removing a unit where result-target is largest minimizes squared error.
-        idx = available[np.argmax(result[available] - target[available])]
-        result[idx] -= 1
-    return result
+def _slice(value):
+    """A tile's position slice, from a live layout (slice) or a JSON layout ([start, stop])."""
+    return value if isinstance(value, slice) else slice(int(value[0]), int(value[1]))
 
 
-def repair(position, layout=None):
-    """Return a valid copy of a whole encoded position (tilings plus categories)."""
-    layout = _get_default_layout() if layout is None else layout
+def is_valid_position(position, layout):
+    """True when every tile group and categorical index is a valid integer choice."""
     position = np.asarray(position, dtype=float)
-    if position.shape != (layout["dim"],):
-        raise ValueError(f"Expected position shape {(layout['dim'],)}, got {position.shape}")
-    if not np.all(np.isfinite(position)):
-        raise ValueError("position must contain only finite values")
-
-    repaired = position.copy()
+    if (
+        position.shape != (layout["dim"],)
+        or not np.all(np.isfinite(position))
+        or not np.array_equal(position, np.rint(position))
+    ):
+        return False
     for tile in layout["tiles"]:
-        tile_slice = tile["slice"]
-        repaired[tile_slice] = repair_tile(
-            repaired[tile_slice], tile["total_exp"], tile["max_inner_exp"]
-        )
-    for categorical in layout["categoricals"]:
-        idx = categorical["index"]
-        repaired[idx] = np.clip(
-            np.rint(repaired[idx]), 0, len(categorical["candidates"]) - 1
-        )
-    return repaired
+        exponents = position[_slice(tile["slice"])]
+        if (
+            np.any(exponents < 0)
+            or exponents.sum() != tile["total_exp"]
+            or exponents[-1] > tile["max_inner_exp"]
+        ):
+            return False
+    return all(
+        0 <= position[categorical["index"]] < len(categorical["candidates"])
+        for categorical in layout["categoricals"]
+    )
 
 
-def position_to_decisions(position, design_space_trace, layout=None):
-    """Return a trace with sample decisions replaced by the repaired position."""
-    layout = describe_space(design_space_trace) if layout is None else layout
+def position_to_decisions(position, design_space_trace, layout):
+    """Return a trace with sample decisions replaced by a valid encoded position."""
     trace = getattr(design_space_trace, "trace", design_space_trace)
     tile_insts, categorical_insts, _ = _sampling_instructions(trace)
     if len(tile_insts) != len(layout["tiles"]) or len(categorical_insts) != len(
         layout["categoricals"]
     ):
         raise ValueError("Trace sampling instructions do not match the cached layout")
-    position = repair(position, layout)
+    if not is_valid_position(position, layout):
+        raise ValueError("position is not a valid encoded schedule")
+    position = np.asarray(position, dtype=float)
     updated_trace = trace
     for tile, inst in zip(layout["tiles"], tile_insts):
         exponents = position[tile["slice"]].astype(int)
@@ -251,10 +178,9 @@ def position_to_decisions(position, design_space_trace, layout=None):
     return updated_trace
 
 
-def decisions_to_position(trace, layout=None):
+def decisions_to_position(trace, layout):
     """Convert recorded tile factors and categorical decisions to an encoded position."""
     trace = getattr(trace, "trace", trace)
-    layout = describe_space(trace) if layout is None else layout
     tile_insts, categorical_insts, _ = _sampling_instructions(trace)
     if len(tile_insts) != len(layout["tiles"]) or len(categorical_insts) != len(
         layout["categoricals"]
@@ -322,30 +248,19 @@ def layout_to_json(layout, sketch_id):
     }
 
 
-STRUCTURAL_LAYOUT_KEYS = ("sketch_id", "tiles", "categoricals", "dim", "parallel_tile_levels")
-
-
 def structural_layout(layout_json):
     """Return only the schedule-space fields of a serialized layout (no target values)."""
-    return {key: layout_json[key] for key in STRUCTURAL_LAYOUT_KEYS}
-
-
-def tile_choice_count(tile):
-    """Number of valid exponent compositions for one tile group (live or JSON layout)."""
-    choices = tile.get("valid_exponents")
-    if choices is None:
-        choices = _valid_tile_exponents(
-            int(tile["n"]), int(tile["total_exp"]), int(tile["max_inner_exp"])
-        )
-    return len(choices)
+    keys = ("sketch_id", "tiles", "categoricals", "dim", "parallel_tile_levels")
+    return {key: layout_json[key] for key in keys}
 
 
 def space_size(layout):
     """Number of valid encoded positions implied by a live or JSON layout."""
-    return math.prod(
-        [tile_choice_count(tile) for tile in layout["tiles"]]
-        + [len(category["candidates"]) for category in layout["categoricals"]]
-    )
+    tile_choices = [
+        len(_valid_tile_exponents(int(tile["n"]), int(tile["total_exp"]), int(tile["max_inner_exp"])))
+        for tile in layout["tiles"]
+    ]
+    return math.prod(tile_choices + [len(category["candidates"]) for category in layout["categoricals"]])
 
 
 def _valid_tile_exponents(n, total, max_inner):
@@ -364,9 +279,8 @@ def _valid_tile_exponents(n, total, max_inner):
     return compositions
 
 
-def random_position(rng, layout=None):
+def random_position(rng, layout):
     """Sample uniformly from valid encoded positions for the described layout."""
-    layout = _get_default_layout() if layout is None else layout
     position = np.zeros(layout["dim"], dtype=float)
     for tile in layout["tiles"]:
         choices = tile.get("valid_exponents")

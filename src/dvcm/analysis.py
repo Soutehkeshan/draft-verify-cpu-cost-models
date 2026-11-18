@@ -136,9 +136,9 @@ def seed_mean_interval(
     return summary
 
 
-def spearman_brown(rho: float, factor: float = 2.0) -> float:
-    """Reliability of a measurement `factor` times as long as one with reliability rho."""
-    return float(factor * rho / (1.0 + (factor - 1.0) * rho))
+def spearman_brown(rho: float) -> float:
+    """Reliability of a measurement twice as long as one with reliability rho: 2r/(1+r)."""
+    return float(2.0 * rho / (1.0 + rho))
 
 
 def split_half(repeats: Sequence[float], interleaved: bool = False) -> tuple[float, float]:

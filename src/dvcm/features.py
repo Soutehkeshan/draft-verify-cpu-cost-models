@@ -62,10 +62,6 @@ def _tile_slice(tile: dict[str, Any]) -> slice:
     return slice(int(value[0]), int(value[1]))
 
 
-def _categorical_index(categorical: dict[str, Any]) -> int:
-    return int(categorical["index"])
-
-
 def feature_names(
     layout: dict[str, Any] | None = None, include_derived: bool = True
 ) -> tuple[str, ...]:
@@ -121,7 +117,7 @@ def derived(position: np.ndarray, layout: dict[str, Any]) -> dict[str, float]:
         )
 
     categorical = layout["categoricals"][0]
-    raw_candidate_idx = position[_categorical_index(categorical)]
+    raw_candidate_idx = position[int(categorical["index"])]
     candidate_idx = int(round(raw_candidate_idx))
     candidates = categorical["candidates"]
     if candidate_idx != raw_candidate_idx:

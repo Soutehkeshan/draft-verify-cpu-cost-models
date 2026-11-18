@@ -2,22 +2,20 @@ import numpy as np
 from tvm.s_tir import meta_schedule as ms
 from tvm.s_tir.meta_schedule.space_generator import PostOrderApply
 
-from dvcm.config import LEGACY_TARGET, load_target_config, load_workload_config
+from dvcm.config import PRIMARY_TARGET, load_target_config, load_workload_config
 from dvcm.encoding import (
-    describe_space,
     decisions_to_position,
-    random_position,
-    repair,
-    repair_tile,
+    describe_space,
+    is_valid_position,
     position_to_decisions,
+    random_position,
 )
 from dvcm.features import feature_names, features
 from dvcm.harness import make_matmul
-from dvcm.study import add_schedule_if_new
 
 
 def _design_spaces():
-    target_config = load_target_config(LEGACY_TARGET)
+    target_config = load_target_config(PRIMARY_TARGET)
     workload = load_workload_config()
     target = target_config.make_tvm_target()
     context = ms.TuneContext(
@@ -35,22 +33,27 @@ def _design_spaces():
 
 def _profiled_layout(schedule):
     layout = describe_space(schedule.trace)
-    layout.update(load_target_config(LEGACY_TARGET).feature_settings())
+    layout.update(load_target_config(PRIMARY_TARGET).feature_settings())
     return layout
 
 
-def test_repair_is_idempotent_for_random_positions():
-    rng = np.random.default_rng(0)
-    for _ in range(1000):
-        position = rng.normal(3.0, 5.0, size=11)
-        repaired = repair(position)
-        np.testing.assert_array_equal(repair(repaired), repaired)
+def test_only_valid_positions_are_accepted():
+    layout = _profiled_layout(_design_spaces()[0])
+    position = random_position(np.random.default_rng(0), layout)
+    assert is_valid_position(position, layout)
+    i_tiles = layout["tiles"][0]["slice"]
+    for broken in (
+        np.where(np.arange(11) == i_tiles.start, position + 1, position),  # tile sum != 9
+        np.where(np.arange(11) == 10, 4, position),  # unroll index out of range
+        position + 0.5,  # not integers
+        position[:10],  # wrong length
+    ):
+        assert not is_valid_position(broken, layout)
 
 
-def test_random_positions_are_valid_and_deduplicate():
+def test_random_positions_are_valid():
     rng = np.random.default_rng(0)
-    seen = set()
-    for sketch_id, schedule in enumerate(_design_spaces()):
+    for schedule in _design_spaces():
         layout = _profiled_layout(schedule)
         for _ in range(200):
             position = random_position(rng, layout).astype(int)
@@ -60,10 +63,7 @@ def test_random_positions_are_valid_and_deduplicate():
                 assert exponents[-1] <= tile["max_inner_exp"]
             categorical = layout["categoricals"][0]
             assert 0 <= position[categorical["index"]] < len(categorical["candidates"])
-            assert add_schedule_if_new(seen, sketch_id, position)
-    first_sketch, first_position = 0, np.zeros(11, dtype=int)
-    assert add_schedule_if_new(seen, first_sketch, first_position)
-    assert not add_schedule_if_new(seen, first_sketch, first_position)
+            assert is_valid_position(position, layout)
 
 
 def test_position_trace_round_trip_and_features():
@@ -76,7 +76,7 @@ def test_position_trace_round_trip_and_features():
         position = random_position(rng, layout)
         updated_trace = position_to_decisions(position, schedule, layout)
         round_trip = decisions_to_position(updated_trace, layout)
-        np.testing.assert_array_equal(round_trip, repair(position, layout))
+        np.testing.assert_array_equal(round_trip, position)
 
         full_features = features(position, sketch_id, layout)
         base_features = features(position, sketch_id, layout, include_derived=False)
@@ -97,8 +97,3 @@ def test_layout_records_sketch_specific_parallel_loop_prefix():
         {"i": 2, "j": 2},
     ]
 
-
-def test_repair_tile_enforces_composition():
-    repaired = repair_tile(np.array([100.0, -5.0, 0.1, 0.0]), total=9, max_inner=5)
-    assert repaired.sum() == 9
-    assert repaired[-1] <= 5
