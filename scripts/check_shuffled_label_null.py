@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Repeat the global shuffled-label check of 05_evaluate.py with more permutations.
+"""Leakage check: train XGBoost on shuffled TRAIN labels and score TEST.
 
-05_evaluate.py trains XGBoost on 20 global permutations of the TRAIN labels
-(seeds 0-19) and scores TEST. This script repeats that check exactly -- the
-same features, TRAIN-fitted constants, VALIDATION-chosen settings, training
-seeds and permutations -- for seeds 0..N-1 (default 120), so its first 20
-rows reproduce shuffled_label_null.csv. It writes, next to the evaluation
-outputs, shuffled_label_null_extended.csv (one row per permutation) and
-shuffled_label_null_extended_summary.csv (mean, standard error, and the
-mean in standard errors, for seeds 0-19 and for all seeds).
+For seeds 0..N-1 (default 120) the TRAIN latencies are permuted globally with
+that seed, both feature sets are trained with the VALIDATION-chosen settings
+and the TRAIN-fitted constants of 04_evaluate.py, and the pooled TEST
+Spearman and fastest-decile Spearman are recorded. With no leak they average
+about zero. It writes shuffled_label_null_extended.csv (one row per
+permutation) and shuffled_label_null_extended_summary.csv (mean, standard
+error, and the mean in standard errors, for seeds 0-19 and for all seeds;
+seeds 0-19 are the 20 permutations 04_evaluate.py used to run itself).
 """
 from __future__ import annotations
 
@@ -37,18 +37,18 @@ from dvcm.study import load_layouts, load_pool, load_splits, validate_splits
 
 MODELS = (("base", False, "xgb(base)"), ("base_analytic", True, "xgb(base+analytic)"))
 METRICS = ("spearman", "fastest_decile_spearman")
-EVALUATION_SEEDS = 20  # the permutations in shuffled_label_null.csv
+EVALUATION_SEEDS = 20  # the permutations 04_evaluate.py used to run
 
 
 def _evaluation_module():
-    spec = importlib.util.spec_from_file_location("dvcm_evaluate", ROOT / "scripts" / "05_evaluate.py")
+    spec = importlib.util.spec_from_file_location("dvcm_evaluate", ROOT / "scripts" / "04_evaluate.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 def permuted_labels(labels: np.ndarray, seed: int) -> np.ndarray:
-    """The global permutation 05_evaluate.py draws for this seed."""
+    """The global permutation of the TRAIN labels for this seed."""
     return np.random.default_rng(seed).permutation(np.asarray(labels))
 
 
@@ -134,8 +134,6 @@ def main() -> None:
     per_seed = pd.DataFrame(rows)
     write_csv(per_seed, results_dir / "shuffled_label_null_extended.csv", provenance)
 
-    reference = pd.read_csv(results_dir / "shuffled_label_null.csv")
-    reference = reference[(reference["scope"] == "pooled") & (reference["shuffle_mode"] == "global")].set_index("model")
     summary_rows = []
     for _, _, model_name in MODELS:
         group = per_seed[per_seed["model"] == model_name]
@@ -144,12 +142,9 @@ def main() -> None:
                 (f"seeds 0-{EVALUATION_SEEDS - 1}", group[group["seed"] < EVALUATION_SEEDS]),
                 (f"seeds 0-{args.permutations - 1}", group),
             ):
-                row = {"model": model_name, "metric": metric, "permutations": label, **summarize(subset[metric])}
-                if len(subset) == EVALUATION_SEEDS:
-                    row["matches_shuffled_label_null_csv"] = bool(
-                        np.isclose(row["mean"], reference.loc[model_name, f"{metric}_mean"], rtol=0, atol=1e-12)
-                    )
-                summary_rows.append(row)
+                summary_rows.append(
+                    {"model": model_name, "metric": metric, "permutations": label, **summarize(subset[metric])}
+                )
     summary = pd.DataFrame(summary_rows)
     write_csv(summary, results_dir / "shuffled_label_null_extended_summary.csv", provenance)
     for row in summary_rows:
@@ -157,8 +152,6 @@ def main() -> None:
             f"{args.target} {row['model']:18s} {row['metric']:23s} {row['permutations']:11s} "
             f"mean {row['mean']:+.4f}  SE {row['standard_error']:.4f}  "
             f"mean/SE {row['mean_over_standard_error']:+.2f}"
-            + (f"  matches shuffled_label_null.csv: {row['matches_shuffled_label_null_csv']}"
-               if "matches_shuffled_label_null_csv" in row else "")
         )
 
 

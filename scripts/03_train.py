@@ -67,7 +67,7 @@ def main() -> None:
     layouts = load_layouts(data_dir, target)
     constants_path = results_dir / "constants.json"
     if not constants_path.exists():
-        raise FileNotFoundError("Run scripts/03_fit_analytic.py before training")
+        raise FileNotFoundError("Run scripts/02_fit_analytic.py before training")
     import json
 
     with constants_path.open(encoding="utf-8") as source:

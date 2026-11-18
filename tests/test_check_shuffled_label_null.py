@@ -1,4 +1,4 @@
-"""scripts/check_shuffled_label_null.py: more global label permutations, made as 05_evaluate makes them."""
+"""scripts/check_shuffled_label_null.py: more global label permutations, made as 04_evaluate makes them."""
 import importlib.util
 from pathlib import Path
 
@@ -21,7 +21,7 @@ def test_permutations_are_the_ones_the_evaluation_draws():
     module = _module()
     labels = np.arange(12.0)
     for seed in (0, 7, 19, 119):
-        expected = np.random.default_rng(seed).permutation(labels)  # 05_evaluate.py, global mode
+        expected = np.random.default_rng(seed).permutation(labels)  # 04_evaluate.py, global mode
         assert np.array_equal(module.permuted_labels(labels, seed), expected)
     assert np.array_equal(labels, np.arange(12.0))  # the input is not shuffled in place
 

@@ -57,7 +57,7 @@ def constants_from_payload(
     nested = payload.get("nested_train_constants")
     if not nested:
         raise ValueError(
-            "constants.json has no nested_train_constants; rerun scripts/03_fit_analytic.py"
+            "constants.json has no nested_train_constants; rerun scripts/02_fit_analytic.py"
         )
     return (
         AnalyticConstants(**payload["hand_set_constants"]),

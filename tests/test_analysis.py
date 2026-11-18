@@ -25,7 +25,7 @@ def _data(n=60, seeds=3, seed=7):
 
 
 def _old_paired_loop(truth, base, hybrid, rng_seed, n_resamples):
-    """The paired loop of scripts/05_evaluate.py before this module existed."""
+    """The paired loop of scripts/04_evaluate.py before this module existed."""
     metric_names = REPORTED_METRICS
     base_values = [ranking_metrics(truth, prediction) for prediction in base]
     hybrid_values = [ranking_metrics(truth, prediction) for prediction in hybrid]

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr, t
+from scipy.stats import spearmanr
 from xgboost import XGBRegressor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,11 +42,9 @@ from dvcm.config import (
     load_workload_config,
 )
 from dvcm.features import features
-from dvcm.learned import train_xgb
 from dvcm.metrics import (
     ranking_metrics,
     spearman,
-    top_k_latency_ratio,
 )
 from dvcm.provenance import capture_provenance, write_csv
 from dvcm.study import (
@@ -321,251 +319,6 @@ def _write_paired_and_learning_curve(
     write_csv(
         pd.DataFrame(paired_rows), results_dir / "learning_curve_paired.csv", provenance
     )
-
-
-def _t_interval(values):
-    values = np.asarray(values, dtype=float)
-    mean = float(np.mean(values))
-    if values.size < 2:
-        return mean, float("nan"), float("nan")
-    margin = float(
-        t.ppf(0.975, values.size - 1)
-        * np.std(values, ddof=1)
-        / np.sqrt(values.size)
-    )
-    return mean, mean - margin, mean + margin
-
-
-def _write_feature_comparison(
-    test, layouts, constants, y_true, provenance, results_dir
-):
-    rows = []
-    for seed in range(5):
-        base = _predict_model_seed(
-            test, layouts, constants, "base", "all", seed, results_dir
-        )
-        hybrid = _predict_model_seed(
-            test, layouts, constants, "base_analytic", "all", seed, results_dir
-        )
-        rng = np.random.default_rng(1000 + seed)
-        base_rho, hybrid_rho, delta_rho = [], [], []
-        base_top1, hybrid_top1, delta_top1 = [], [], []
-        for _ in range(1000):
-            indexes = rng.integers(0, len(y_true), size=len(y_true))
-            truth = y_true[indexes]
-            base_sample, hybrid_sample = base[indexes], hybrid[indexes]
-            base_rho.append(spearman(truth, base_sample))
-            hybrid_rho.append(spearman(truth, hybrid_sample))
-            delta_rho.append(hybrid_rho[-1] - base_rho[-1])
-            base_ratio = top_k_latency_ratio(truth, np.argsort(base_sample), 1)
-            hybrid_ratio = top_k_latency_ratio(truth, np.argsort(hybrid_sample), 1)
-            base_top1.append(base_ratio)
-            hybrid_top1.append(hybrid_ratio)
-            delta_top1.append(hybrid_ratio - base_ratio)
-
-        base_point = spearman(y_true, base)
-        hybrid_point = spearman(y_true, hybrid)
-        base_ratio = top_k_latency_ratio(y_true, np.argsort(base), 1)
-        hybrid_ratio = top_k_latency_ratio(y_true, np.argsort(hybrid), 1)
-        rows.append(
-            {
-                "seed": seed,
-                "base_spearman": base_point,
-                "base_spearman_ci_low": float(np.quantile(base_rho, 0.025)),
-                "base_spearman_ci_high": float(np.quantile(base_rho, 0.975)),
-                "hybrid_spearman": hybrid_point,
-                "hybrid_spearman_ci_low": float(np.quantile(hybrid_rho, 0.025)),
-                "hybrid_spearman_ci_high": float(np.quantile(hybrid_rho, 0.975)),
-                "delta_spearman_hybrid_minus_base": hybrid_point - base_point,
-                "delta_spearman_ci_low": float(np.quantile(delta_rho, 0.025)),
-                "delta_spearman_ci_high": float(np.quantile(delta_rho, 0.975)),
-                "base_top_1_latency_ratio": base_ratio,
-                "base_top_1_ci_low": float(np.quantile(base_top1, 0.025)),
-                "base_top_1_ci_high": float(np.quantile(base_top1, 0.975)),
-                "hybrid_top_1_latency_ratio": hybrid_ratio,
-                "hybrid_top_1_ci_low": float(np.quantile(hybrid_top1, 0.025)),
-                "hybrid_top_1_ci_high": float(np.quantile(hybrid_top1, 0.975)),
-                "delta_top_1_hybrid_minus_base": hybrid_ratio - base_ratio,
-                "delta_top_1_ci_low": float(np.quantile(delta_top1, 0.025)),
-                "delta_top_1_ci_high": float(np.quantile(delta_top1, 0.975)),
-            }
-        )
-    write_csv(
-        pd.DataFrame(rows),
-        results_dir / "feature_comparison_seeds.csv",
-        provenance,
-    )
-    summary = []
-    for metric in (
-        "base_spearman",
-        "hybrid_spearman",
-        "delta_spearman_hybrid_minus_base",
-        "base_top_1_latency_ratio",
-        "hybrid_top_1_latency_ratio",
-        "delta_top_1_hybrid_minus_base",
-    ):
-        mean, low, high = _t_interval([row[metric] for row in rows])
-        if metric in ("base_top_1_latency_ratio", "hybrid_top_1_latency_ratio"):
-            low = max(1.0, low)
-        summary.append(
-            {
-                "metric": metric,
-                "mean_over_seeds": mean,
-                "ci95_low": low,
-                "ci95_high": high,
-                "seed_count": len(rows),
-            }
-        )
-    write_csv(
-        pd.DataFrame(summary),
-        results_dir / "feature_comparison_summary.csv",
-        provenance,
-    )
-
-
-def _write_shuffled_label_null(
-    train, test, layouts, constants, y_true, scopes, provenance, results_dir
-):
-    with (results_dir / "training_grid.json").open(encoding="utf-8") as source:
-        grid = json.load(source)["best"]
-
-    raw_rows = []
-    first_global_hybrid = None
-    for feature_set, include_derived in (
-        ("base", False),
-        ("base_analytic", True),
-    ):
-        x_train = _model_features(train, layouts, include_derived, constants)
-        x_test = _model_features(test, layouts, include_derived, constants)
-        config = grid[feature_set]
-        for shuffle_mode in ("global", "within_sketch"):
-            for seed in range(20):
-                rng = np.random.default_rng(seed)
-                labels = train["median_ms"].to_numpy(dtype=float)
-                if shuffle_mode == "global":
-                    shuffled = rng.permutation(labels)
-                else:
-                    shuffled = labels.copy()
-                    sketch_ids = train["sketch_id"].to_numpy(dtype=int)
-                    for sketch_id in np.unique(sketch_ids):
-                        indexes = np.flatnonzero(sketch_ids == sketch_id)
-                        shuffled[indexes] = rng.permutation(labels[indexes])
-
-                model = train_xgb(
-                    x_train,
-                    shuffled,
-                    max_depth=config["max_depth"],
-                    learning_rate=config["learning_rate"],
-                    n_estimators=config["n_estimators"],
-                    seed=seed,
-                )
-                prediction = np.exp(model.predict(x_test))
-                if (
-                    shuffle_mode == "global"
-                    and feature_set == "base_analytic"
-                    and seed == 0
-                ):
-                    first_global_hybrid = prediction
-                for scope, indexes in scopes:
-                    values = _metric_values(y_true[indexes], prediction[indexes])
-                    raw_rows.append(
-                        {
-                            "shuffle_mode": shuffle_mode,
-                            "model": "xgb(base+analytic)"
-                            if include_derived
-                            else "xgb(base)",
-                            "scope": scope,
-                            "seed": seed,
-                            "spearman": values["spearman"],
-                            "fastest_decile_spearman": values[
-                                "fastest_decile_spearman"
-                            ],
-                            "max_depth": config["max_depth"],
-                            "learning_rate": config["learning_rate"],
-                            "n_estimators": config["n_estimators"],
-                        }
-                    )
-
-    raw = pd.DataFrame(raw_rows)
-    summary_rows = []
-    group_columns = ("shuffle_mode", "model", "scope")
-    scope_sizes = {name: len(indexes) for name, indexes in scopes}
-    for group_values, group in raw.groupby(list(group_columns), sort=False):
-        shuffle_mode, model_name, scope = group_values
-        summary = {
-            "shuffle_mode": shuffle_mode,
-            "model": model_name,
-            "scope": scope,
-            "n_shuffles": len(group),
-            "seeds": "0-19",
-            "n_train": len(train),
-            "n_test": scope_sizes[scope],
-            "max_depth": int(group["max_depth"].iloc[0]),
-            "learning_rate": float(group["learning_rate"].iloc[0]),
-            "n_estimators": int(group["n_estimators"].iloc[0]),
-        }
-        for metric in ("spearman", "fastest_decile_spearman"):
-            values = group[metric].to_numpy(dtype=float)
-            summary[f"{metric}_mean"] = float(np.mean(values))
-            summary[f"{metric}_std"] = float(np.std(values, ddof=1))
-            summary[f"{metric}_min"] = float(np.min(values))
-            summary[f"{metric}_max"] = float(np.max(values))
-        summary_rows.append(summary)
-    write_csv(
-        pd.DataFrame(summary_rows),
-        results_dir / "shuffled_label_null.csv",
-        provenance,
-    )
-
-    if first_global_hybrid is not None:
-        pooled = _metric_values(y_true, first_global_hybrid)
-        write_csv(
-            pd.DataFrame(
-                [
-                    {
-                        "training_label_order": "global permutation; seed 0",
-                        "spearman": pooled["spearman"],
-                        "fastest_decile_spearman": pooled[
-                            "fastest_decile_spearman"
-                        ],
-                        "n_train": len(train),
-                        "n_test": len(test),
-                    }
-                ]
-            ),
-            results_dir / "shuffled_label_check.csv",
-            provenance,
-        )
-
-    print(
-        "Shuffle design: global permutes TRAIN labels across all sketches; "
-        "within_sketch permutes labels separately per sketch. sketch_id is "
-        "included in both feature variants."
-    )
-    print(
-        "Leakage checks: split overlap validation; features and analytic score "
-        "use schedule/layout rather than latency labels; sketch_id is explicit."
-    )
-    global_pooled = raw[
-        (raw["shuffle_mode"] == "global") & (raw["scope"] == "pooled")
-    ]
-    possible_leak = False
-    for model_name, group in global_pooled.groupby("model", sort=False):
-        for metric in ("spearman", "fastest_decile_spearman"):
-            values = group[metric].to_numpy(dtype=float)
-            mean = float(np.mean(values))
-            standard_error = float(np.std(values, ddof=1) / np.sqrt(len(values)))
-            if abs(mean) > 2 * standard_error:
-                possible_leak = True
-            print(
-                f"Global-shuffle {model_name} {metric}: mean={mean:.4f}, "
-                f"std={np.std(values, ddof=1):.4f}, 2SE={2 * standard_error:.4f}"
-            )
-    if possible_leak:
-        print(
-            "WARNING: global shuffled-label result exceeds 2 standard errors "
-            "from zero; possible leak requires investigation."
-        )
 
 
 def _scorer_rows(scopes, y_true, predictions):
@@ -908,9 +661,7 @@ def main() -> None:
     splits = load_splits(data_dir)
     validate_splits(splits, set(frame["id"].astype(int)))
     layouts = load_layouts(data_dir, target)
-    train_ids = set(int(value) for value in splits["train"])
     test_ids = set(int(value) for value in splits["test"])
-    train = frame[frame["id"].astype(int).isin(train_ids)].reset_index(drop=True)
     test = frame[frame["id"].astype(int).isin(test_ids)].reset_index(drop=True)
     if test.empty:
         raise ValueError("The test split contains no modelable measurements")
@@ -986,7 +737,6 @@ def main() -> None:
         verify_score = verify_predictions[indexes]
         true_order = np.argsort(scoped_truth, kind="stable")
         true_top_10 = set(true_order[: min(10, len(indexes))].tolist())
-        true_top_1 = set(true_order[:1].tolist())
         for requested_k in (32, 64, 128, 256):
             scoped_drafts = {
                 name: scores[indexes] for name, scores in draft_scores.items()
@@ -998,28 +748,12 @@ def main() -> None:
                 draft_order = np.argsort(draft_score, kind="stable")
                 drafted = set(draft_order[: min(requested_k, len(indexes))].tolist())
                 recall_top_10 = len(true_top_10 & drafted)
-                recall_top_1 = len(true_top_1 & drafted)
                 draft_only_ratio = _draft_only_ratio(
                     scoped_truth, draft_score, requested_k
                 )
                 ratio = _draft_verify_ratio(
                     scoped_truth, draft_score, verify_score, requested_k
                 )
-                bootstrap = []
-                rng = np.random.default_rng(
-                    50_000 + scope_index * 100 + requested_k
-                )
-                for _ in range(1000):
-                    sample = rng.integers(0, len(indexes), size=len(indexes))
-                    bootstrap.append(
-                        _draft_verify_ratio(
-                            scoped_truth[sample],
-                            draft_score[sample],
-                            verify_score[sample],
-                            requested_k,
-                        )
-                    )
-                low, high = np.quantile(bootstrap, [0.025, 0.975])
                 draft_rows.append(
                     {
                         "scope": scope,
@@ -1031,19 +765,8 @@ def main() -> None:
                         "draft_recall_at_K_top_10_count": recall_top_10,
                         "draft_recall_at_K_top_10_fraction": recall_top_10
                         / max(1, len(true_top_10)),
-                        "draft_recall_at_K_top_1_count": recall_top_1,
-                        "draft_recall_at_K_top_1_fraction": float(recall_top_1),
                         "draft_only_top_1_latency_ratio": draft_only_ratio,
-                        "verify_only_top_1_latency_ratio": _draft_only_ratio(
-                            scoped_truth, verify_score, len(indexes)
-                        ),
-                        "best_1": ratio,
                         "top_1_latency_ratio": ratio,
-                        "top_1_chosen_over_best_latency_ratio": ratio,
-                        "best_1_ci_low": float(low),
-                        "best_1_ci_high": float(high),
-                        "top_1_ci_low": float(low),
-                        "top_1_ci_high": float(high),
                     }
                 )
     write_csv(
@@ -1132,22 +855,6 @@ def main() -> None:
 
     retime = _write_retime_outputs(test, data_dir, predictions, provenance, results_dir)
 
-    _write_feature_comparison(
-        test, layouts, fitted, y_true, provenance, results_dir
-    )
-    _write_shuffled_label_null(
-        train, test, layouts, fitted, y_true, scopes, provenance, results_dir
-    )
-
-    all_data = load_pool(include_failures=True, data_dir=data_dir)
-    write_csv(
-        all_data["status"]
-        .value_counts()
-        .rename_axis("status")
-        .reset_index(name="count"),
-        results_dir / "failure_rates.csv",
-        provenance,
-    )
     print(
         f"Evaluated {len(test)} held-out schedules "
         f"({max(2, int(np.ceil(len(test) * 0.1)))} in the fastest decile); "
