@@ -123,7 +123,7 @@ batch fails, two RPC reconnects happen in a row, or the RPC server's
 environment changes.
 
 **Bring-up checks** (before the collection; scripts removed on 2026-11-18,
-in Git history at `fa96298`; outputs kept in `data/jetson_nano/`): the
+in Git history at `51e2a4d`; outputs kept in `data/jetson_nano/`): the
 schedule space and loop order of the cross-compiled code; a 150-schedule
 replay pilot, all correct, which set the slow threshold to 20 times the pilot
 median; a 20-schedule noise canary over five rounds and two RPC sessions;
@@ -167,9 +167,9 @@ stayed between +0.35% and +0.62%.
 
 ## Results
 
-All files are in `results/jetson_nano/`; each `.meta.json` names the commit
-that wrote it. They were produced at `eb7df09` (the 120-permutation leakage
-check at `5990b94`). On 2026-11-18 the trimmed code reproduced every one of
+All files are in `results/jetson_nano/`, each with a `.meta.json` recording
+its provenance. They were produced at `eee2a4c` (the 120-permutation leakage
+check at `eba8e42`). On 2026-11-18 the trimmed code reproduced every one of
 them exactly, from a fresh committed copy (correlations, fit, training,
 evaluation, leakage).
 
