@@ -101,7 +101,7 @@ def learning_curve_figure(summary: pd.DataFrame, paired: pd.DataFrame):
             _size_axis(axis)
         bottom.set_xlabel("TRAIN schedules")
         top.set_ylabel(r"Spearman $\rho$")
-        bottom.set_ylabel("Difference")
+        bottom.set_ylabel("Gain from formula")
         bottom.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.01))
         bottom.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.2f"))
         figure.align_ylabels([top, bottom])
