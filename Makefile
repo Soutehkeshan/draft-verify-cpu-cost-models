@@ -8,7 +8,7 @@ export OPENBLAS_NUM_THREADS := 1
 
 ALLOW_DIRTY_FLAG = $(if $(ALLOW_DIRTY),--allow-dirty,)
 
-.PHONY: test models eval leakage report all
+.PHONY: test models eval leakage confirm report all
 
 # Unit tests (no Nano needed).
 test:
@@ -27,6 +27,10 @@ eval: models
 # Shuffled-label leakage check (120 permutations; trains 240 models, slow).
 leakage:
 	$(PYTHON) scripts/check_shuffled_label_null.py $(ALLOW_DIRTY_FLAG)
+
+# Frozen models on the confirmation TEST set in data/jetson_nano_confirm/.
+confirm:
+	$(PYTHON) scripts/evaluate_confirmation.py $(ALLOW_DIRTY_FLAG)
 
 # Report tables and figures from the result files, then check every number in Report/*.tex.
 report:
