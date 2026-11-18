@@ -6,20 +6,13 @@ __pycache__/
 .pytest_cache/
 
 logs/
-data/*.parquet
-data/*.parquet.tmp
-data/*.zip
-data/layout_*.json
-data/run_meta.json
-data/canary.json
-data/splits.json
-data/smoke/
-data/*/pool.parquet
-data/*/pool.parquet.tmp
-data/*/layout_*.json
-data/*/run_meta.json
-data/*/canary.json
-data/*/splits.json
+# The report and the plain-language guide are kept out of Git
+Report/
+docs/
+
+# Datasets: one folder per target (data/apple_m2/, data/jetson_nano/), all generated
+data/*
+!data/.gitkeep
 
 results/*.csv
 results/*.json
@@ -30,6 +23,5 @@ results/*/*.json
 results/*/models/
 results/*/plots/
 
-# Nano qualification/collection outputs and raw telemetry traces (generated)
-data/nano/
+# Raw telemetry traces (generated)
 results/*/telemetry/
