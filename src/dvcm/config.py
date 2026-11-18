@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[2]
 HARDWARE_CONFIG_DIR = ROOT / "configs" / "hardware"
 WORKLOAD_CONFIG_DIR = ROOT / "configs" / "workloads"
 PRIMARY_TARGET = "jetson_nano"
-LEGACY_TARGET = "apple_m2"
 TARGET_IDS = tuple(sorted(path.stem for path in HARDWARE_CONFIG_DIR.glob("*.json")))
 
 

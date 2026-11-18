@@ -91,7 +91,7 @@ def positions_run(tmp_path, monkeypatch):
         num_threads=4,
     )
     layouts = [describe_space(sketch.trace) for sketch in context.generate_design_space()]
-    source, out = tmp_path / "m2", tmp_path / "nano"
+    source, out = tmp_path / "source", tmp_path / "nano"
     source.mkdir()
     out.mkdir()
     for sketch_id, layout in enumerate(layouts):
@@ -139,9 +139,9 @@ def positions_run(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(collector.time, "sleep", run.sleeps.append)
     run.args = argparse.Namespace(
-        positions_from=source / "pool.parquet", order="test_first", splits=None,
+        positions_from=source / "pool.parquet", splits=None,
         rpc_host="127.0.0.1", rpc_port=9090, ssh_target="nano", output_dir=out,
-        n=5000, smoke=False, pilot_only=False, allow_dirty=True, batch_size=2, cooldown_s=60.0,
+        n=5000, allow_dirty=True, batch_size=2, cooldown_s=60.0,
     )
     run.collect = lambda: collector.collect_from_positions(
         run.args, argparse.ArgumentParser(), profile, workload
@@ -165,9 +165,9 @@ def test_test_first_order_is_test_then_validation_then_nested_train():
 
 
 def test_test_first_order_on_m2_splits_when_present():
-    path = ROOT / "data" / "splits.json"
+    path = ROOT / "data" / "jetson_nano" / "splits.json"
     if not path.is_file():
-        pytest.skip("M2 splits.json not present")
+        pytest.skip("Nano splits.json not present")
     splits = json.loads(path.read_text(encoding="utf-8"))
     ids = set(splits["train"]) | set(splits["validation"]) | set(splits["test"])
     order = _collector().order_test_first(splits, ids)
@@ -212,7 +212,7 @@ def test_real_nano_profile_refuses_without_pilot_before_connecting(tmp_path, mon
         [
             "01_collect.py", "--target", "jetson_nano",
             "--positions-from", str(tmp_path / "source" / "pool.parquet"),
-            "--order", "test_first", "--rpc-host", "127.0.0.1",
+            "--rpc-host", "127.0.0.1",
             "--ssh-target", "nano", "--output-dir", str(tmp_path),
         ],
     )
@@ -289,10 +289,6 @@ def test_restarted_run_records_a_new_rpc_session_index(positions_run):
     assert sessions[4] == {"batch_start": 1, "batch_end": 1}
     collection = json.loads((run.out / "run_meta.json").read_text())["collection"]
     assert collection["rpc_sessions_opened"] == 2 and collection["state"] == "complete"
-    spec = importlib.util.spec_from_file_location("report", ROOT / "scripts" / "report_nano_collection.py")
-    reporter = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reporter)
-    assert "Stayed in one RPC session: **no**" in reporter.build_report(run.out, run.out / "missing.parquet")
 
 
 def _paused(run) -> dict:

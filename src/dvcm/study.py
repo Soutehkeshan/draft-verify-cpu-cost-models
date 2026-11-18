@@ -9,15 +9,7 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "data"
-RESULTS_DIR = ROOT / "results"
-POOL_PATH = DATA_DIR / "pool.parquet"
-# Compatibility for layouts collected before parallel-loop metadata was serialized.
-_LEGACY_PARALLEL_TILE_LEVELS = {
-    0: {"i": 2, "j": 2},
-    1: {"i": 1, "j": 1},
-    2: {"i": 2, "j": 2},
-}
+DATA_DIR = ROOT / "data" / "jetson_nano"
 
 
 def load_layouts(
@@ -31,12 +23,7 @@ def load_layouts(
         with path.open(encoding="utf-8") as source:
             layout = json.load(source)
         if "parallel_tile_levels" not in layout:
-            try:
-                layout["parallel_tile_levels"] = _LEGACY_PARALLEL_TILE_LEVELS[sketch_id]
-            except KeyError as error:
-                raise ValueError(
-                    f"Legacy layout {path} lacks parallel-loop metadata"
-                ) from error
+            raise ValueError(f"Layout {path} lacks parallel-loop metadata")
         if target is not None:
             from dvcm.features import bind_target_settings
 
@@ -65,27 +52,6 @@ def load_pool(
     return frame.reset_index(drop=True)
 
 
-def positions_and_features(
-    frame: pd.DataFrame,
-    include_derived: bool = True,
-    data_dir: Path = DATA_DIR,
-    target: Any | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Convert table records to encoded position and feature matrices."""
-    from dvcm.features import features
-
-    layouts = load_layouts(data_dir, target)
-    positions = np.asarray([np.asarray(row, dtype=float) for row in frame["vector"]])
-    matrix = np.asarray(
-        [
-            features(position, int(sketch_id), layouts[int(sketch_id)], include_derived)
-            for position, sketch_id in zip(positions, frame["sketch_id"])
-        ],
-        dtype=float,
-    )
-    return positions, matrix
-
-
 def load_splits(data_dir: Path = DATA_DIR) -> dict[str, Any]:
     """Load deterministic schedule-ID splits from a selected dataset."""
     path = data_dir / "splits.json"
@@ -93,37 +59,6 @@ def load_splits(data_dir: Path = DATA_DIR) -> dict[str, Any]:
         raise FileNotFoundError(f"Split file not found: {path}; run make models")
     with path.open(encoding="utf-8") as source:
         return json.load(source)
-
-
-def make_splits(frame: pd.DataFrame, seed: int = 0) -> dict[str, Any]:
-    """Create reproducible per-sketch 70/15/15 splits and nested TRAIN subsets."""
-    rng = np.random.default_rng(seed)
-    train: list[int] = []
-    validation: list[int] = []
-    test: list[int] = []
-    for _, group in frame.groupby("sketch_id", sort=True):
-        ids = group["id"].astype(int).to_numpy()
-        rng.shuffle(ids)
-        n_train = int(len(ids) * 0.70)
-        n_validation = int(len(ids) * 0.15)
-        train.extend(ids[:n_train].tolist())
-        validation.extend(ids[n_train : n_train + n_validation].tolist())
-        test.extend(ids[n_train + n_validation :].tolist())
-
-    subset_order = np.asarray(train, dtype=int)
-    rng.shuffle(subset_order)
-    nested = {
-        str(size): subset_order[: min(size, len(subset_order))].tolist()
-        for size in (100, 250, 500, 1000, 2000)
-    }
-    nested["all"] = subset_order.tolist()
-    return {
-        "seed": seed,
-        "train": sorted(train),
-        "validation": sorted(validation),
-        "test": sorted(test),
-        "nested_train": nested,
-    }
 
 
 def validate_splits(splits: dict[str, Any], sample_ids: set[int]) -> None:
@@ -164,33 +99,8 @@ def validate_splits(splits: dict[str, Any], sample_ids: set[int]) -> None:
         raise ValueError("The 'all' nested training subset must equal TRAIN")
 
 
-def restrict_splits(source: dict[str, Any], sample_ids: set[int]) -> dict[str, Any]:
-    """Keep an existing split's roles for the given IDs, preserving list order.
-
-    A target that re-measures another target's positions keeps the source's
-    TRAIN/VALIDATION/TEST roles and nested TRAIN subsets, so both targets are
-    scored on the same held-out schedules. IDs outside ``sample_ids`` (not
-    modelable on this target) are dropped from every list.
-    """
-
-    def keep(values: list[Any]) -> list[int]:
-        return [int(value) for value in values if int(value) in sample_ids]
-
-    restricted: dict[str, Any] = {
-        name: keep(source[name]) for name in ("train", "validation", "test")
-    }
-    restricted["nested_train"] = {
-        name: keep(values) for name, values in source["nested_train"].items()
-    }
-    if "seed" in source:
-        restricted["seed"] = source["seed"]
-    return restricted
-
-
 def collection_complete(metadata: dict[str, Any]) -> bool:
-    """Read the completion flag from top-level (M2) or ``collection`` (Nano) metadata."""
-    if "collection_complete" in metadata:
-        return bool(metadata["collection_complete"])
+    """Read the completion flag of a collection's run_meta.json."""
     return bool((metadata.get("collection") or {}).get("collection_complete", False))
 
 
@@ -204,12 +114,3 @@ def save_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
-def add_schedule_if_new(
-    seen: set[tuple[int, tuple[int, ...]]], sketch_id: int, vector: list[int] | np.ndarray
-) -> bool:
-    """Remember a sketch/vector key once; return False for repeated schedules."""
-    key = (int(sketch_id), tuple(int(value) for value in vector))
-    if key in seen:
-        return False
-    seen.add(key)
-    return True

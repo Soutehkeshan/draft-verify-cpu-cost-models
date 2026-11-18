@@ -1,11 +1,10 @@
-"""Compile and measure individual MetaSchedule traces."""
+"""Compile individual MetaSchedule traces and time them on the Nano over RPC."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 import logging
 import time
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import tvm
@@ -68,29 +67,6 @@ def make_matmul(n: int) -> tvm.tirx.PrimFunc:
     return te.create_prim_func([a, b, c])
 
 
-@lru_cache(maxsize=8)
-def _cached_inputs(n: int, seed: int) -> tuple[Any, Any, Any, np.ndarray]:
-    device = tvm.cpu()
-    to_device = getattr(tvm.runtime, "tensor", None) or tvm.nd.array
-    rng = np.random.default_rng(seed)
-    a_np = rng.random((n, n), dtype=np.float32)
-    b_np = rng.random((n, n), dtype=np.float32)
-    reference = a_np @ b_np
-    a = to_device(a_np, device)
-    b = to_device(b_np, device)
-    c = to_device(np.zeros((n, n), dtype="float32"), device)
-    return a, b, c, reference
-
-
-def prepare_inputs(
-    config: HarnessConfig, rpc_executor: RPCExecutor | None = None
-) -> tuple[Any, Any, Any, np.ndarray]:
-    """Return cached inputs and their NumPy reference result."""
-    if rpc_executor is not None:
-        return rpc_executor.prepare_inputs(config.n, config.seed)
-    return _cached_inputs(config.n, config.seed)
-
-
 def _zero_output(c: Any, config: HarnessConfig) -> None:
     c.copyfrom(np.zeros((config.n, config.n), dtype="float32"))
 
@@ -107,21 +83,11 @@ def _stats(
     )
 
 
-def time_module(
-    lib: Any,
-    config: HarnessConfig,
-    rpc_executor: RPCExecutor | None = None,
-    timing_marker: Callable[[str, str], None] | None = None,
-    timing_label: str | None = None,
-) -> TimingResult:
-    """Check correctness and time a compiled module using a consistent protocol."""
-    if (timing_marker is None) != (timing_label is None):
-        raise ValueError("timing_marker and timing_label must be supplied together")
-    if timing_marker is not None and rpc_executor is None:
-        raise ValueError("timing markers are supported only for RPC measurements")
-    a, b, c, reference = prepare_inputs(config, rpc_executor)
-    device = rpc_executor.device if rpc_executor is not None else tvm.cpu()
-    mod = lib if hasattr(lib, "time_evaluator") else lib.jit()
+def time_module(lib: Any, config: HarnessConfig, rpc_executor: RPCExecutor) -> TimingResult:
+    """Check correctness, then time a module loaded on the remote CPU."""
+    a, b, c, reference = rpc_executor.prepare_inputs(config.n, config.seed)
+    device = rpc_executor.device
+    mod = lib
     entry = mod["main"]
     _zero_output(c, config)
     entry(a, b, c)
@@ -135,21 +101,11 @@ def time_module(
             (), float("nan"), float("nan"), "wrong_result", max_abs_error
         )
 
-    if rpc_executor is None:
-        _zero_output(c, config)
-        single_start = time.perf_counter()
-        entry(a, b, c)
-        single_ms = (time.perf_counter() - single_start) * 1000.0
-    else:
-        single_result = mod.time_evaluator(
-            "main", device, repeat=1, number=1, min_repeat_ms=0
-        )(a, b, c)
-        single_ms = float(single_result.results[0]) * 1000.0
+    single_result = mod.time_evaluator("main", device, repeat=1, number=1, min_repeat_ms=0)(a, b, c)
+    single_ms = float(single_result.results[0]) * 1000.0
     if single_ms > config.slow_threshold_ms:
         return _stats((single_ms,), "slow_skip", max_abs_error)
 
-    if rpc_executor is None:
-        _zero_output(c, config)
     evaluator = mod.time_evaluator(
         "main",
         device,
@@ -157,16 +113,7 @@ def time_module(
         number=config.number,
         min_repeat_ms=config.min_repeat_ms,
     )
-    if timing_marker is None:
-        result = evaluator(a, b, c)
-    else:
-        if timing_label is None:
-            raise ValueError("timing_label is required when timing_marker is set")
-        timing_marker("start", timing_label)
-        try:
-            result = evaluator(a, b, c)
-        finally:
-            timing_marker("end", timing_label)
+    result = evaluator(a, b, c)
     repeats_ms = tuple(float(value) * 1000.0 for value in result.results)
     return _stats(repeats_ms, "ok", max_abs_error)
 
@@ -212,11 +159,9 @@ def measure(
     design_space_trace: Any,
     layout: dict[str, Any],
     config: HarnessConfig,
-    rpc_executor: RPCExecutor | None = None,
-    timing_marker: Callable[[str, str], None] | None = None,
-    timing_label: str | None = None,
+    rpc_executor: RPCExecutor,
 ) -> MeasurementResult:
-    """Build and measure one schedule on the local or optional remote CPU."""
+    """Build one schedule, load it on the Nano, and time it there."""
     start = time.perf_counter()
     lib, status = build_from_position(position, design_space_trace, layout, config)
     build_time_s = time.perf_counter() - start
@@ -225,17 +170,8 @@ def measure(
             TimingResult((), float("nan"), float("nan"), status),
             build_time_s,
         )
-    if rpc_executor is None:
-        return MeasurementResult(time_module(lib, config), build_time_s)
-
     remote_library = rpc_executor.load_module(lib)
-    timing = time_module(
-        remote_library.module,
-        config,
-        rpc_executor,
-        timing_marker=timing_marker,
-        timing_label=timing_label,
-    )
+    timing = time_module(remote_library.module, config, rpc_executor)
     return MeasurementResult(
         timing=timing,
         build_time_s=build_time_s,

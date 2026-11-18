@@ -1,4 +1,4 @@
-"""scripts/03_fit_analytic.py: analytic constants refit on every nested TRAIN subset."""
+"""scripts/02_fit_analytic.py: analytic constants refit on every nested TRAIN subset."""
 import importlib.util
 from pathlib import Path
 
@@ -7,14 +7,14 @@ import pandas as pd
 import pytest
 
 from dvcm.analytic import AnalyticConstants, constants_from_payload, fit_constants, latency_seconds
-from dvcm.config import LEGACY_TARGET, load_target_config
+from dvcm.config import PRIMARY_TARGET, load_target_config
 from test_models import _layout, _positions
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _fitter():
-    spec = importlib.util.spec_from_file_location("fit_analytic_test", ROOT / "scripts" / "03_fit_analytic.py")
+    spec = importlib.util.spec_from_file_location("fit_analytic_test", ROOT / "scripts" / "02_fit_analytic.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -30,7 +30,7 @@ def _log_rmse(frame, layouts, constants):
 
 def test_each_nested_subset_is_fit_on_its_own_rows_and_all_reuses_the_train_fit():
     layouts = {0: _layout()}
-    initial = AnalyticConstants(**load_target_config(LEGACY_TARGET).analytic_constants())
+    initial = AnalyticConstants(**load_target_config(PRIMARY_TARGET).analytic_constants())
     subset_truth = AnalyticConstants(**{**initial.to_dict(), "peak_flops": 2.5e11, "bandwidth_bytes_s": 8.0e10})
     other_truth = AnalyticConstants(**{**initial.to_dict(), "peak_flops": 2.0e10, "bandwidth_bytes_s": 5.0e9})
     positions = _positions()
@@ -57,7 +57,7 @@ def test_each_nested_subset_is_fit_on_its_own_rows_and_all_reuses_the_train_fit(
 
 
 def test_constants_payload_gives_hand_set_fitted_and_nested_constants():
-    initial = AnalyticConstants(**load_target_config(LEGACY_TARGET).analytic_constants())
+    initial = AnalyticConstants(**load_target_config(PRIMARY_TARGET).analytic_constants())
     fitted = AnalyticConstants(**{**initial.to_dict(), "peak_flops": 1.0e11})
     payload = {
         "hand_set_constants": initial.to_dict(),

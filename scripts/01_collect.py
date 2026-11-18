@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 import platform
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -28,13 +27,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dvcm.encoding import (
     describe_space,
+    is_valid_position,
     layout_to_json,
-    random_position,
-    repair,
     structural_layout,
 )
 from dvcm.config import (
-    LEGACY_TARGET,
     TargetConfig,
     WorkloadConfig,
     add_target_argument,
@@ -55,28 +52,11 @@ from dvcm.harness import (
 )
 from dvcm.provenance import capture_provenance
 from dvcm.rpc import RPCExecutor
-from dvcm.study import add_schedule_if_new, save_json
+from dvcm.study import save_json
 
 N_TARGET = 5000
 BATCH_SIZE = 250
 COOLDOWN_S = 60
-PILOT_N = 50
-MAX_PROJECTED_HOURS = 8
-CHECKPOINT_SIZE = 25
-
-
-def _mac_value(command: list[str]) -> str:
-    try:
-        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unavailable"
-
-
-def _power_state() -> str:
-    output = _mac_value(["pmset", "-g", "batt"])
-    return output.replace("\n", "; ")[:300]
-
-
 def _append_rows(rows: list[dict], pool_path: Path) -> None:
     if not rows:
         return
@@ -89,34 +69,6 @@ def _append_rows(rows: list[dict], pool_path: Path) -> None:
     temporary_path = pool_path.with_suffix(pool_path.suffix + ".tmp")
     incoming.to_parquet(temporary_path, index=False)
     temporary_path.replace(pool_path)
-
-
-def _sample_pool(sketches: list, layouts: list[dict], count: int, rng: np.random.Generator) -> list:
-    counts = np.asarray(
-        [
-            np.prod(
-                [len(tile["valid_exponents"]) for tile in layout["tiles"]]
-                + [len(category["candidates"]) for category in layout["categoricals"]]
-            )
-            for layout in layouts
-        ],
-        dtype=float,
-    )
-    if count > int(counts.sum()):
-        raise ValueError(
-            f"Requested {count} unique schedules, but only {int(counts.sum())} are valid"
-        )
-    probabilities = counts / counts.sum()
-    print(f"Valid schedules per sketch: {[int(value) for value in counts]} (weighted total={int(counts.sum())})")
-    seen: set[tuple[int, tuple[int, ...]]] = set()
-    samples = []
-    while len(samples) < count:
-        sketch_id = int(rng.choice(len(sketches), p=probabilities))
-        position = random_position(rng, layouts[sketch_id]).astype(int)
-        if not add_schedule_if_new(seen, sketch_id, position):
-            continue
-        samples.append((sketch_id, position))
-    return samples
 
 
 def _record(
@@ -171,7 +123,7 @@ def _execution_metadata(
 
 
 # --------------------------------------------------------------------------
-# Positions-driven collection (e.g. the M2 pool's schedules on the Nano).
+# Positions-driven collection: time a given pool's schedules on the Nano.
 # Written for the Nano; not run until the jetson_nano collection gate opens.
 
 
@@ -317,7 +269,7 @@ def _verify_layouts(layouts: list[dict], source_dir: Path, output_dir: Path) -> 
 
 
 def _require_valid(position: np.ndarray, layout: dict, label: str) -> None:
-    if not np.array_equal(repair(position.astype(float), layout), position.astype(float)):
+    if not is_valid_position(position, layout):
         raise SystemExit(f"Refusing to collect: {label} is not a valid position (no resampling)")
 
 
@@ -522,10 +474,6 @@ def collect_from_positions(
     workload: WorkloadConfig,
 ) -> None:
     """Measure an existing pool's (sketch_id, vector) rows on an RPC target."""
-    if args.smoke or args.pilot_only:
-        parser.error("--positions-from cannot be combined with --smoke or --pilot-only")
-    if args.order != "test_first":
-        parser.error("--positions-from requires --order test_first")
     if not args.rpc_host:
         parser.error("--positions-from requires --rpc-host")
     if not args.ssh_target:
@@ -817,343 +765,31 @@ def collect_from_positions(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Time an existing pool's schedules on the Jetson Nano over TVM RPC."
+    )
     add_target_argument(parser)
-    parser.add_argument("--n", type=int, default=N_TARGET)
-    parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--pilot-only", action="store_true")
-    parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--rpc-host")
-    parser.add_argument("--rpc-port", type=int, default=9090)
     parser.add_argument(
         "--positions-from",
         type=Path,
-        help="measure the (id, sketch_id, vector) rows of an existing pool, e.g. data/pool.parquet",
-    )
-    parser.add_argument(
-        "--order",
-        choices=("test_first",),
-        help="with --positions-from: TEST, then VALIDATION, then TRAIN in nested-subset order",
-    )
-    parser.add_argument("--batch-size", type=int, help=f"with --positions-from (default {BATCH_SIZE})")
-    parser.add_argument(
-        "--cooldown-s", type=float, help=f"with --positions-from: seconds between batches (default {COOLDOWN_S})"
+        required=True,
+        help="pool.parquet whose (id, sketch_id, vector) rows are measured, e.g. a copy of the released dataset",
     )
     parser.add_argument("--splits", type=Path, help="splits.json (default: next to --positions-from)")
-    parser.add_argument("--ssh-target", help="Nano SSH target for per-batch device-state records")
+    parser.add_argument("--output-dir", type=Path, help="default: the profile's data directory")
+    parser.add_argument("--n", type=int, default=N_TARGET, help="measure only the first n in test-first order")
+    parser.add_argument("--rpc-host", required=True)
+    parser.add_argument("--rpc-port", type=int, default=9090)
+    parser.add_argument("--ssh-target", required=True, help="Nano SSH target for per-batch device-state records")
+    parser.add_argument("--batch-size", type=int, help=f"schedules per batch (default {BATCH_SIZE})")
+    parser.add_argument("--cooldown-s", type=float, help=f"seconds between batches (default {COOLDOWN_S})")
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
-        help="with --positions-from: allow an uncommitted worktree (recorded in provenance)",
+        help="allow an uncommitted worktree (recorded in provenance)",
     )
     args = parser.parse_args()
-    target_config = load_target_config(args.target, ROOT)
-    workload = load_workload_config(root=ROOT)
-    if args.positions_from is not None:
-        collect_from_positions(args, parser, target_config, workload)
-        return
-    if (
-        args.order or args.splits or args.ssh_target or args.allow_dirty
-        or args.batch_size is not None or args.cooldown_s is not None
-    ):
-        parser.error(
-            "--order, --splits, --ssh-target, --batch-size, --cooldown-s, and "
-            "--allow-dirty require --positions-from"
-        )
-    if target_config.target_id != LEGACY_TARGET:
-        # Sampling new positions is the M2 pool's protocol; other targets replay it.
-        parser.error(
-            f"--target {target_config.target_id} collects by replaying an existing pool: "
-            "use --positions-from data/pool.parquet --order test_first --rpc-host ... --ssh-target ..."
-        )
-    target_config.require_benchmarking_profile()
-    target = target_config.make_tvm_target()
-    rpc_executor = (
-        RPCExecutor.connect(args.rpc_host, args.rpc_port)
-        if args.rpc_host
-        else None
-    )
-    n_target = 30 if args.smoke else args.n
-    repeats = 2 if args.smoke else workload.measurement["repeats"]
-    number = workload.measurement["number"]
-    min_repeat_ms = workload.measurement["min_repeat_ms"]
-    cooldown = 0 if args.smoke else COOLDOWN_S
-    if args.pilot_only and args.smoke:
-        parser.error("--pilot-only cannot be combined with --smoke")
-    if n_target < 1:
-        parser.error("--n must be positive")
-
-    data_dir, results_dir = target_config.paths(ROOT)
-    output_dir = (
-        args.output_dir
-        if args.output_dir is not None
-        else data_dir / "smoke"
-        if args.smoke
-        else data_dir
-    )
-    meta_path = output_dir / "run_meta.json"
-    reduced_for_projection = False
-    if not args.smoke and args.n == N_TARGET and meta_path.exists():
-        with meta_path.open(encoding="utf-8") as source:
-            previous_meta = json.load(source)
-        if previous_meta.get("target_reduced_for_projection"):
-            n_target = 3000
-            reduced_for_projection = True
-            print("Resuming the previously reduced 3,000-schedule target")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results_dir.mkdir(parents=True, exist_ok=True)
-    num_threads = target_config.thread_settings.get("TVM_NUM_THREADS", 1)
-    context = ms.TuneContext(
-        mod=make_matmul(workload.n),
-        target=target,
-        space_generator=PostOrderApply(
-            sch_rules=target_config.schedule_rules,
-            postprocs=target_config.postprocessors,
-        ),
-        rand_state=workload.seed,
-        num_threads=num_threads,
-    )
-    print(f"Target profile: {target_config.target_id} ({target})")
-    sketches = context.generate_design_space()
-    layouts = [describe_space(schedule.trace) for schedule in sketches]
-    print(f"Design-space sketches: {len(sketches)}")
-    for sketch_id, layout in enumerate(layouts):
-        layout_path = output_dir / f"layout_{sketch_id}.json"
-        if not layout_path.exists():
-            save_json(layout_path, layout_to_json(layout, sketch_id))
-
-    rng = np.random.default_rng(workload.seed)
-    sample_count = n_target if args.smoke else max(N_TARGET, args.n)
-    samples = _sample_pool(sketches, layouts, sample_count, rng)
-    run_order = rng.permutation(sample_count).tolist()
-    canaries = [
-        {"sketch_id": sketch_id, "vector": position.tolist()}
-        for sketch_id, position in samples[:20]
-    ]
-    canary_path = output_dir / "canary.json"
-    if not canary_path.exists():
-        save_json(canary_path, canaries)
-    else:
-        with canary_path.open(encoding="utf-8") as source:
-            canaries = json.load(source)
-
-    pool_path = output_dir / "pool.parquet"
-    existing = pd.read_parquet(pool_path) if pool_path.exists() else pd.DataFrame()
-    measured_ids = set(existing["id"].astype(int)) if not existing.empty else set()
-    remaining = [
-        (idx, samples[idx])
-        for idx in run_order[:n_target]
-        if idx not in measured_ids
-    ]
-    if not remaining and meta_path.exists():
-        statuses = Counter(existing["status"])
-        print(f"Collection already complete: {len(existing)} measured schedules")
-        print(
-            "Status counts:",
-            {
-                name: int(statuses.get(name, 0))
-                for name in ("ok", "build_fail", "wrong_result", "slow_skip")
-            },
-        )
-        return
-    start_time = datetime.now(timezone.utc)
-    run_started = time.perf_counter()
-    config = HarnessConfig(
-        target=target,
-        postprocessors=target_config.postprocessors,
-        n=workload.n,
-        repeats=repeats,
-        number=number,
-        min_repeat_ms=min_repeat_ms,
-        seed=workload.seed,
-        slow_threshold_ms=float("inf"),
-    )
-
-    pilot_count = min(PILOT_N, len(remaining))
-    pending_rows = []
-    pilot_sample_ids = []
-    pilot_ms = []
-    pilot_setup = []
-    for sample_id, (sketch_id, position) in remaining[:pilot_count]:
-        measurement = measure(
-            position, sketches[sketch_id], layouts[sketch_id], config, rpc_executor
-        )
-        pending_rows.append(_record(sample_id, sketch_id, position, measurement, -1))
-        pilot_sample_ids.append(sample_id)
-        if len(pending_rows) >= 10:
-            _append_rows(pending_rows, pool_path)
-            measured_ids.update(int(row["id"]) for row in pending_rows)
-            pending_rows.clear()
-        if measurement.timing.repeats_ms:
-            pilot_ms.append(measurement.timing.median_ms)
-        pilot_setup.append(
-            measurement.build_time_s
-            + measurement.export_time_s
-            + measurement.upload_time_s
-            + measurement.link_load_time_s
-        )
-    if pending_rows:
-        _append_rows(pending_rows, pool_path)
-        measured_ids.update(int(row["id"]) for row in pending_rows)
-        pending_rows.clear()
-    pilot_frame = pd.read_parquet(pool_path)
-    pilot_frame = pilot_frame[pilot_frame["id"].isin(pilot_sample_ids)]
-    pilot_statuses = Counter(pilot_frame["status"])
-    pilot_median = float(np.median(pilot_ms)) if pilot_ms else 1.0
-    slow_threshold_ms = max(pilot_median * 20.0, 0.001)
-    config = HarnessConfig(
-        target=target,
-        postprocessors=target_config.postprocessors,
-        n=workload.n,
-        repeats=repeats,
-        number=number,
-        min_repeat_ms=min_repeat_ms,
-        seed=workload.seed,
-        slow_threshold_ms=slow_threshold_ms,
-    )
-    projection_setup = float(np.mean(pilot_setup[:20])) if pilot_setup else 0.0
-    projection_measure = float(np.mean(pilot_ms[:20])) / 1000.0 if pilot_ms else 0.0
-    batch_count = (n_target + BATCH_SIZE - 1) // BATCH_SIZE
-    projected_seconds = (
-        (n_target + batch_count * len(canaries))
-        * (projection_setup + projection_measure)
-        + max(0, batch_count - 1) * cooldown
-    )
-    print(f"Pilot median: {pilot_median:.6f} ms; slow threshold: {slow_threshold_ms:.6f} ms")
-    print(
-        "Pilot status counts:",
-        {
-            name: int(pilot_statuses.get(name, 0))
-            for name in ("ok", "build_fail", "wrong_result", "slow_skip")
-        },
-    )
-    print(f"Projected run time: {projected_seconds / 3600:.2f} hours")
-    if not args.smoke and projected_seconds > MAX_PROJECTED_HOURS * 3600 and args.n == N_TARGET:
-        n_target = 3000
-        reduced_for_projection = True
-        batch_count = (n_target + BATCH_SIZE - 1) // BATCH_SIZE
-        projected_seconds = (
-            (n_target + batch_count * len(canaries))
-            * (projection_setup + projection_measure)
-            + max(0, batch_count - 1) * cooldown
-        )
-        print("Projection exceeds 8 hours; reducing N_TARGET to 3000")
-        print(f"Reduced-pool projection: {projected_seconds / 3600:.2f} hours")
-
-    if args.pilot_only:
-        print("Pilot complete; collection was not started.")
-        return
-
-    canary_rows = []
-    last_active_batch = None
-    completed_count = len(set(run_order[:n_target]).intersection(measured_ids))
-    run_samples_completed = 0
-    for batch_id, start in enumerate(range(0, n_target, BATCH_SIZE)):
-        batch_order = run_order[start : min(start + BATCH_SIZE, n_target)]
-        batch_indexes = [
-            sample_id
-            for sample_id in batch_order
-            if sample_id not in measured_ids
-        ]
-        if not batch_indexes:
-            continue
-        if last_active_batch is not None and cooldown:
-            time.sleep(cooldown)
-        batch_canary_rows = []
-        for canary_id, item in enumerate(canaries):
-            sketch_id = int(item["sketch_id"])
-            position = np.asarray(item["vector"], dtype=int)
-            measurement = measure(
-                position, sketches[sketch_id], layouts[sketch_id], config, rpc_executor
-            )
-            batch_canary_rows.append(
-                {
-                    **_record(-1, sketch_id, position, measurement, batch_id),
-                    "canary_id": canary_id,
-                }
-            )
-        canary_rows.extend(batch_canary_rows)
-        last_active_batch = batch_id
-
-        for sample_id in batch_indexes:
-            sketch_id, position = samples[sample_id]
-            measurement = measure(
-                position,
-                sketches[sketch_id],
-                layouts[sketch_id],
-                config,
-                rpc_executor,
-            )
-            row = _record(sample_id, sketch_id, position, measurement, batch_id)
-            pending_rows.append(row)
-            if len(pending_rows) >= CHECKPOINT_SIZE:
-                _append_rows(pending_rows, pool_path)
-                pending_rows.clear()
-            completed_count += 1
-            run_samples_completed += 1
-            completed = completed_count
-            if completed >= 100 and completed % 25 == 0:
-                elapsed = time.perf_counter() - run_started
-                rate = run_samples_completed / max(elapsed, 1e-9) * 60
-                eta_minutes = (n_target - completed) / max(rate, 1e-9)
-                print(f"{completed} samples; {rate:.1f} samples/min; ETA {eta_minutes:.1f} min")
-    _append_rows(pending_rows, pool_path)
-    if canary_rows:
-        canary_log_path = (
-            output_dir / "canary_log.csv"
-            if args.smoke
-            else results_dir / "canary.csv"
-        )
-        canary_frame = pd.DataFrame(canary_rows)
-        if canary_log_path.exists():
-            canary_frame = pd.concat(
-                [pd.read_csv(canary_log_path), canary_frame], ignore_index=True
-            )
-        canary_frame.to_csv(canary_log_path, index=False)
-
-    pool = pd.read_parquet(pool_path)
-    statuses = Counter(pool["status"])
-    ended = datetime.now(timezone.utc)
-    meta = {
-        **_execution_metadata(
-            target_config,
-            workload,
-            target,
-            rpc_executor,
-            args.rpc_host,
-            args.rpc_port,
-        ),
-        "machine_model": _mac_value(["sysctl", "-n", "hw.model"]),
-        "macos_version": platform.mac_ver()[0] or None,
-        "host_platform": platform.platform(),
-        "python_version": platform.python_version(),
-        "power_state": _power_state(),
-        "thread_settings": {
-            "TVM_NUM_THREADS": str(num_threads),
-            "target_num_cores": target_config.num_cores,
-        },
-        "config": {
-            "n": workload.n,
-            "seed": workload.seed,
-            "repeats": repeats,
-            "number": number,
-            "min_repeat_ms": min_repeat_ms,
-            "n_target": n_target,
-            "batch_size": BATCH_SIZE,
-            "cooldown_s": cooldown,
-        },
-        "collection_complete": completed_count >= n_target,
-        "target_reduced_for_projection": reduced_for_projection,
-        "slow_threshold_ms": slow_threshold_ms,
-        "slow_skip_fraction": float((pool["status"] == "slow_skip").mean()),
-        "start_timestamp": start_time.isoformat(),
-        "end_timestamp": ended.isoformat(),
-        "status_counts": {name: int(statuses.get(name, 0)) for name in ("ok", "build_fail", "wrong_result", "slow_skip")},
-        "projection_seconds": projected_seconds,
-    }
-    save_json(meta_path, meta)
-    print("Status counts:", meta["status_counts"])
-    print(f"Slow-skip fraction: {meta['slow_skip_fraction']:.1%}")
+    collect_from_positions(args, parser, load_target_config(args.target, ROOT), load_workload_config(root=ROOT))
 
 
 if __name__ == "__main__":

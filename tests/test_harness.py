@@ -7,7 +7,7 @@ from tvm.s_tir.meta_schedule.space_generator import PostOrderApply
 
 import dvcm.harness as harness
 from dvcm.encoding import decisions_to_position, describe_space
-from dvcm.config import LEGACY_TARGET, load_target_config, load_workload_config
+from dvcm.config import PRIMARY_TARGET, load_target_config, load_workload_config
 from dvcm.harness import (
     HarnessConfig,
     _schedule_from_position,
@@ -19,7 +19,7 @@ from dvcm.rpc import RPCExecutor
 
 
 def _first_design_space():
-    target_config = load_target_config(LEGACY_TARGET)
+    target_config = load_target_config(PRIMARY_TARGET)
     workload = load_workload_config()
     target = target_config.make_tvm_target()
     context = ms.TuneContext(
@@ -66,7 +66,7 @@ def test_unroll_index_changes_postprocessed_program():
     )
 
 
-def test_known_good_schedule_builds_and_passes_correctness():
+def test_known_good_schedule_cross_compiles_for_the_nano():
     schedule, layout, target, target_config, workload = _first_design_space()
     position = decisions_to_position(schedule.trace, layout)
     config = HarnessConfig(
@@ -82,16 +82,9 @@ def test_known_good_schedule_builds_and_passes_correctness():
     library, status = build_from_position(position, schedule, layout, config)
     assert status == "ok"
     assert library is not None
-    result = time_module(library, config)
-    assert result.status == "ok"
-    assert len(result.repeats_ms) == config.repeats
-    assert np.isfinite(result.median_ms)
-    # Max |C - A@B| is reported alongside the rtol=atol=1e-4 check.
-    assert result.max_abs_error is not None
-    assert 0.0 <= result.max_abs_error < 1e-4 + 1e-4 * workload.k
 
 
-def test_timing_markers_bracket_only_repeated_rpc_evaluator(monkeypatch):
+def test_rpc_timing_probes_once_then_times_the_repeats(monkeypatch):
     reference = np.zeros((1, 1), dtype=np.float32)
 
     class Output:
@@ -118,11 +111,6 @@ def test_timing_markers_bracket_only_repeated_rpc_evaluator(monkeypatch):
             return evaluate
 
     events = []
-    monkeypatch.setattr(
-        harness,
-        "prepare_inputs",
-        lambda config, rpc_executor: (object(), object(), Output(), reference),
-    )
     monkeypatch.setattr(harness, "_zero_output", lambda output, config: None)
     class Session:
         def cpu(self):
@@ -139,17 +127,13 @@ def test_timing_markers_bracket_only_repeated_rpc_evaluator(monkeypatch):
         slow_threshold_ms=float("inf"),
     )
 
+    executor = RPCExecutor(Session())
+    executor.prepare_inputs = lambda n, seed: (object(), object(), Output(), reference)
     result = time_module(
         Library(),
         config,
-        rpc_executor=RPCExecutor(Session()),
-        timing_marker=lambda action, label: events.append((action, label)),
-        timing_label="sketch-0-batch-0",
+        rpc_executor=executor,
     )
 
-    assert events == [
-        ("start", "sketch-0-batch-0"),
-        "evaluator",
-        ("end", "sketch-0-batch-0"),
-    ]
+    assert events == ["evaluator"]
     assert result.repeats_ms == (2.0, 4.0)

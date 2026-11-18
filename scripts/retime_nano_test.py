@@ -146,7 +146,7 @@ def _write_parquet(rows: list[dict], path: Path) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--target", default="jetson_nano", choices=("jetson_nano",))
-    parser.add_argument("--data-dir", type=Path, help="Nano dataset directory (default: data/nano)")
+    parser.add_argument("--data-dir", type=Path, help="Nano dataset directory (default: data/jetson_nano)")
     parser.add_argument("--rpc-host", required=True)
     parser.add_argument("--rpc-port", type=int, default=9090)
     parser.add_argument("--ssh-target", required=True, help="Nano SSH target for the read-only probes")

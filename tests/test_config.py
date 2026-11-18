@@ -4,27 +4,15 @@ from dvcm.features import features
 import numpy as np
 import pytest
 
-from dvcm.config import LEGACY_TARGET, load_target_config, load_workload_config
+from dvcm.config import PRIMARY_TARGET, load_target_config, load_workload_config
 
 
-def test_target_profiles_keep_m2_compatibility_and_nano_uses_explicit_llvm():
-    m2 = load_target_config(LEGACY_TARGET)
-    assert m2.compiler_target == {
-        "kind": "llvm",
-        "mcpu": "apple-m2",
-        "num-cores": 4,
-    }
-    assert m2.feature_settings() == {
-        "vector_lanes": 4,
-        "num_cores": 4,
-        "vector_registers": 32,
-    }
-    assert m2.paths()[1].as_posix().endswith("results/apple_m2")
-
+def test_nano_profile_uses_explicit_llvm_rules_and_its_own_hardware_values():
+    assert load_target_config(PRIMARY_TARGET).target_id == "jetson_nano"
     nano = load_target_config("jetson_nano")
     assert nano.cpu == "ARM Cortex-A57"
     assert nano.num_cores == 4
-    assert nano.paths()[0].as_posix().endswith("data/nano")
+    assert nano.paths()[0].as_posix().endswith("data/jetson_nano")
     assert nano.compiler_target == {
         "kind": "llvm",
         "mtriple": "aarch64-linux-gnu",
@@ -35,9 +23,9 @@ def test_target_profiles_keep_m2_compatibility_and_nano_uses_explicit_llvm():
     assert nano_target.kind.name == "llvm"
     assert nano_target.attrs["mtriple"] == "aarch64-linux-gnu"
     assert nano_target.attrs["mcpu"] == "cortex-a57"
-    # Explicit llvm rules match the M2 collection; "from-target" would pick ARM rules.
+    # Explicit llvm rules; "from-target" would pick ARM-specific rules for this target.
     assert (nano.schedule_rules, nano.postprocessors) == ("llvm", "llvm")
-    assert (nano.schedule_rules, nano.postprocessors) == (m2.schedule_rules, m2.postprocessors)
+    assert nano.feature_settings() == {"vector_lanes": 4, "num_cores": 4, "vector_registers": 32}
     nano.require_benchmarking_profile()
     with pytest.raises(RuntimeError, match="not configured"):
         replace(nano, schedule_rules=None).require_benchmarking_profile()
@@ -50,9 +38,6 @@ def test_target_profiles_keep_m2_compatibility_and_nano_uses_explicit_llvm():
         "num_cores": 4,
         "vector_registers": 32,
     }
-    m2_constants = m2.analytic_constants()
-    for name in ("peak_flops", "bandwidth_bytes_s", "l1_bytes", "l2_bytes"):
-        assert nano.analytic_constants()[name] != m2_constants[name]
     for name in ("peak_flops", "bandwidth_bytes_s"):
         assert nano.notes[name].startswith("initial guess, fitted on TRAIN only")
     assert nano.feature_settings() == {

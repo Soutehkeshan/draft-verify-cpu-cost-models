@@ -8,7 +8,7 @@ from dvcm.analytic import (
     latency_components,
     latency_seconds,
 )
-from dvcm.config import LEGACY_TARGET, load_target_config
+from dvcm.config import PRIMARY_TARGET, load_target_config
 from dvcm.learned import predict_latency, train_xgb
 
 
@@ -22,7 +22,7 @@ def _layout():
         ],
         "categoricals": [{"index": 10, "candidates": [0, 16, 64, 512]}],
         "parallel_tile_levels": {"i": 2, "j": 2},
-        **load_target_config(LEGACY_TARGET).feature_settings(),
+        **load_target_config(PRIMARY_TARGET).feature_settings(),
     }
 
 
@@ -43,7 +43,7 @@ def test_analytic_constants_fit_positive_training_measurements():
     layout = _layout()
     layouts = [layout] * len(_positions())
     positions = _positions()
-    initial = AnalyticConstants(**load_target_config(LEGACY_TARGET).analytic_constants())
+    initial = AnalyticConstants(**load_target_config(PRIMARY_TARGET).analytic_constants())
     truth = AnalyticConstants(
         **{
             **initial.to_dict(),

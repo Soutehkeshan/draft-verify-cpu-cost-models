@@ -1,6 +1,6 @@
 import numpy as np
 
-from dvcm.config import LEGACY_TARGET, load_target_config
+from dvcm.config import PRIMARY_TARGET, load_target_config
 from dvcm.analytic import AnalyticConstants, Penalties, latency_seconds, penalty_terms
 from dvcm.features import (
     ALL_DERIVED_NAMES,
@@ -35,8 +35,8 @@ def _positions():
     return tiny_tile, large_tile
 
 
-def _m2_constants(**overrides):
-    values = load_target_config(LEGACY_TARGET).analytic_constants()
+def _profile_constants(**overrides):
+    values = load_target_config(PRIMARY_TARGET).analytic_constants()
     values.update(overrides)
     return AnalyticConstants(**values)
 
@@ -46,18 +46,16 @@ def test_nano_constants_and_feature_binding_come_from_the_nano_profile():
     constants = AnalyticConstants.from_target(nano)
     assert (constants.l1_bytes, constants.l2_bytes) == (32768, 2097152)
     assert (constants.lane_width, constants.num_cores, constants.vector_registers) == (4, 4, 32)
-    m2 = AnalyticConstants.from_target(load_target_config(LEGACY_TARGET))
-    assert constants.peak_flops != m2.peak_flops
-    assert constants.bandwidth_bytes_s != m2.bandwidth_bytes_s
 
     layout = {**_layout(), "vector_lanes": 8, "num_cores": 8, "vector_registers": 16}
     bound = bind_target_settings(layout, nano)
     assert (bound["vector_lanes"], bound["num_cores"], bound["vector_registers"]) == (4, 4, 32)
     assert layout["vector_lanes"] == 8  # input layout is not mutated
-    # A 2 MiB L2 penalises the large tile that fits the M2's 16 MiB L2.
+    # The Nano's 2 MiB L2 penalises a large tile that a 16 MiB L2 would hold.
     _, large_tile = _positions()
     assert penalty_terms(large_tile, bound, constants)["cache_l2"] < 1.0
-    assert penalty_terms(large_tile, _layout(), m2)["cache_l2"] == 1.0
+    larger_l2 = AnalyticConstants(**{**constants.to_dict(), "l2_bytes": 16 * 1024 * 1024})
+    assert penalty_terms(large_tile, bound, larger_l2)["cache_l2"] == 1.0
 
 
 def test_flops_and_bytes_are_correct_for_tiny_and_large_tiles():
@@ -111,7 +109,7 @@ def test_utilization_and_penalty_terms_are_bounded():
     assert tiny["register_utilisation"] == 1.0
     assert large["register_utilisation"] == 0.03125
 
-    constants = _m2_constants()
+    constants = _profile_constants()
     for position in (tiny_tile, large_tile):
         factors = penalty_terms(position, layout, constants)
         assert set(factors) == {
@@ -130,7 +128,7 @@ def test_utilization_and_penalty_terms_are_bounded():
     constrained = penalty_terms(
         tiny_tile,
         layout,
-        _m2_constants(l1_bytes=1, l2_bytes=1),
+        _profile_constants(l1_bytes=1, l2_bytes=1),
     )
     assert all(constrained[name] < 1.0 for name in ("cache_l1", "cache_l2"))
 
@@ -148,7 +146,7 @@ def test_utilization_and_penalty_terms_are_bounded():
 def test_latency_is_compute_plus_memory_work_over_effective_peak():
     layout = _layout()
     tiny_tile, _ = _positions()
-    constants = _m2_constants()
+    constants = _profile_constants()
     descriptors = derived(tiny_tile, layout)
     factors = penalty_terms(tiny_tile, layout, constants)
     expected = descriptors["flop_count"] / (
