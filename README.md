@@ -325,7 +325,8 @@ TRAIN, five seed pairs, 95% paired range from 2,000 resamples):
   measurements, are what limit the ranking of the best schedules.
 
 Results with provenance are in `results/jetson_nano_confirm/` (`summary.json`,
-`paired.csv`, `scores.csv`, `learning_curve.csv`, `draft.csv`, `noise.csv`).
+`paired.csv`, `scores.csv`, `learning_curve.csv`, `draft.csv`, `noise.csv`),
+produced by `make confirm` at commit `d4e814d`, the commit that fixed the plan.
 
 ## Running it
 
