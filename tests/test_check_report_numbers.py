@@ -93,3 +93,18 @@ def test_ambiguity_counts_distinct_values_not_copies_of_one_value():
     assert sources.candidates(common) == ["a.csv:x", "b.csv:y", "c.csv:y"]
     assert sources.distinct_values(common) == 2  # two different quantities round to 0.937
     assert sources.distinct_values(rare) == 1  # one quantity, copied into two files
+
+
+def test_confirmation_results_are_sources_and_their_learning_curve_is_not_per_seed(tmp_path):
+    checker = _checker()
+    (tmp_path / "results" / "jetson_nano").mkdir(parents=True)
+    (tmp_path / "results" / "jetson_nano" / "learning_curve.csv").write_text("seed,spearman\n0,0.9381\n")
+    confirm = tmp_path / "results" / "jetson_nano_confirm"
+    confirm.mkdir(parents=True)
+    (confirm / "paired.csv").write_text("metric,difference\nspearman,0.00512\n")
+    (confirm / "learning_curve.csv").write_text("subset,difference\n500,0.01741\n")  # one row per size, not per seed
+    sources = checker.load_sources(tmp_path)
+    gain, curve, per_seed = checker.extract_numbers("+0.005, 0.017 and 0.938")
+    assert sources.match(gain) == "results/jetson_nano_confirm/paired.csv:difference"
+    assert sources.match(curve) == "results/jetson_nano_confirm/learning_curve.csv:difference"
+    assert sources.match(per_seed) is None

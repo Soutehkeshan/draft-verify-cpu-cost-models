@@ -10,10 +10,11 @@ exactly. Comments, citations, references, labels, URLs, file names, lengths,
 tabular column specifications and affiliations are not checked, and neither
 are digits inside names such as A57.
 
-Sources: every CSV and JSON file in results/jetson_nano (models/ excluded),
-the run, collection and re-timing metadata and the collection report in
-data/jetson_nano/, the profiles in configs/, and the sizes of the
-split lists. Every .tex file under Report/ is checked, tables included.
+Sources: every CSV and JSON file in results/jetson_nano (models/ excluded)
+and results/jetson_nano_confirm, the run, collection and re-timing metadata
+and the collection report in data/jetson_nano/, the confirmation run's
+metadata and batch log in data/jetson_nano_confirm/, the profiles in
+configs/, and the sizes of the split lists. Every .tex file under Report/ is checked, tables included.
 Prints each mismatch as path:line and exits 1 if there is any.
 """
 from __future__ import annotations
@@ -70,9 +71,10 @@ SOURCE_TOKENS = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])")
 # One row per training seed or permutation: thousands of values that a report
 # quotes only as means, and that would let a mistyped mean match by chance.
 PER_SEED_FILES = {
-    "learning_curve.csv",
-    "shuffled_label_null_extended.csv",
+    "results/jetson_nano/learning_curve.csv",
+    "results/jetson_nano/shuffled_label_null_extended.csv",
 }
+RESULT_DIRS = ("results/jetson_nano", "results/jetson_nano_confirm")
 
 
 @dataclass(frozen=True)
@@ -232,12 +234,12 @@ def _walk(node, prefix: str, out: list) -> None:
 
 def load_sources(root: Path = ROOT, include_per_seed: bool = False) -> Sources:
     values: list[tuple[float, str]] = []
-    directory = root / "results" / "jetson_nano"
-    for path in sorted(directory.glob("*.csv")):
-        if path.name in PER_SEED_FILES and not include_per_seed:
+    paths = [path for directory in RESULT_DIRS for path in sorted((root / directory).glob("*.csv"))]
+    for path in paths:
+        name = path.relative_to(root).as_posix()
+        if name in PER_SEED_FILES and not include_per_seed:
             continue
         frame = pd.read_csv(path)
-        name = path.relative_to(root).as_posix()
         for column in frame.columns:
             series = frame[column]
             if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
@@ -245,13 +247,15 @@ def load_sources(root: Path = ROOT, include_per_seed: bool = False) -> Sources:
             else:
                 for cell in series.dropna().astype(str):
                     values.extend((float(t), f"{name}:{column}") for t in SOURCE_TOKENS.findall(cell))
-    for path in sorted(directory.glob("*.json")):
+    for path in (path for directory in RESULT_DIRS for path in sorted((root / directory).glob("*.json"))):
         _walk(json.loads(path.read_text(encoding="utf-8")), path.relative_to(root).as_posix(), values)
-    for name in ("data/jetson_nano/run_meta.json", "data/jetson_nano/test_retime_meta.json"):
+    for name in ("data/jetson_nano/run_meta.json", "data/jetson_nano/test_retime_meta.json",
+                 "data/jetson_nano_confirm/run_meta.json"):
         path = root / name
         if path.is_file():
             _walk(json.loads(path.read_text(encoding="utf-8")), name, values)
-    for name in ("data/jetson_nano/collection_batches.jsonl", "data/jetson_nano/test_retime_batches.jsonl"):
+    for name in ("data/jetson_nano/collection_batches.jsonl", "data/jetson_nano/test_retime_batches.jsonl",
+                 "data/jetson_nano_confirm/collection_batches.jsonl"):
         path = root / name
         if path.is_file():
             for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
