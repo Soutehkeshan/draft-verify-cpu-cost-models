@@ -35,6 +35,9 @@ ratios are lower-is-better. In short:
   ranking point the same way (top-10 recall +0.20 [0.00, +0.38], top-1 ratio
   −0.155 [−0.229, +0.007]) but their intervals reach zero.
 - The features help only from about 500 TRAIN schedules on.
+- **v3.0 confirmation on 20,000 new schedules:** the overall gain holds
+  (+0.005 [+0.004, +0.006]), but the gains near the top do not; see
+  "Confirmation results" below.
 - The vector penalty carries the analytical model, which sorts schedules into
   a few coarse groups; as a drafter it keeps few of the fastest schedules.
 - A second timing of TEST agrees at Spearman 0.998 overall and 0.953 within
@@ -272,6 +275,58 @@ the repeat-noise ceiling of the new timings. The schedules are timed in a
 random order, so if the run stops early, the ones timed so far are still a
 random sample and are analysed as they are.
 
+### Confirmation results (v3.0)
+
+All 20,000 schedules were timed (19,854 fully, 146 once because they ran
+over the slow threshold). Canary drift stayed between +0.9% and +3.8%, under
+the 5% pause limit, and the clock never dropped. The run took two RPC
+sessions: the Nano's RPC worker keeps every module it loads mapped in memory,
+about four mappings each, and after 15,059 schedules it reached Linux's
+per-process limit (`vm.max_map_count` = 65,530), so the remaining 4,941 were
+timed in a fresh session. A third session, cut short by a network drop after
+941 schedules, was deleted before any analysis and its schedules were timed
+again in the second session (`data/jetson_nano_confirm/sessions_note.json`).
+
+Gain from adding the analytical features (hybrid minus plain XGBoost, full
+TRAIN, five seed pairs, 95% paired range from 2,000 resamples):
+
+| Metric | Original TEST (752) | Confirmation (20,000) | Confirmed |
+|---|---|---|---|
+| Spearman | +0.006 [+0.001, +0.012] | +0.005 [+0.004, +0.006] | yes |
+| Fastest-decile Spearman | +0.073 [−0.026, +0.179] | −0.001 [−0.024, +0.019] | no |
+| Fastest found (top-10 in 30 / top-1% in 3%) | +0.20 [0.00, +0.38] | +0.03 [−0.02, +0.08] | no |
+| Top-1 latency ratio | −0.155 [−0.229, +0.007] | −0.080 [−0.164, +0.466] | no |
+| Top-5 latency ratio (not primary) | −0.065 [−0.156, +0.016] | +0.146 [−0.041, +0.325] | no |
+
+- **The overall gain is real and now precise.** +0.005 against +0.006
+  before, with a range ten times narrower; all five seeds improve, and the
+  gain holds in each of the three sketches separately.
+- **The larger gains near the top did not hold.** With about 200 schedules
+  in the fastest 1% instead of ten, the hybrid finds the best schedules no
+  better than plain XGBoost: the fastest-decile gain is zero and the other
+  top-of-ranking ranges all include zero. The bigger numbers on the original
+  TEST set were luck from a small sample.
+- **The gain shrinks as XGBoost gets more data.** Overall Spearman gains
+  +0.001 at 100 TRAIN schedules (not significant), then +0.013, +0.017,
+  +0.012, +0.007 and +0.005 at 250, 500, 1,000, 2,000 and 3,499, all
+  significant. Near the top, the hybrid helps only with little data
+  (fastest-decile gain +0.042 at 250 and +0.026 at 500; top-1% recall +0.05
+  and +0.06 at 100 and 250), and the help is gone by 1,000. Four of the
+  15 top-of-ranking comparisons below full TRAIN exclude zero, against about
+  one expected by chance; as secondary results they are a lead, not a
+  finding.
+- **The formula alone stays weak, and drafts poorly.** Spearman 0.471
+  (fitted constants), 0.127 within the fastest decile. Of the fastest 200
+  schedules, its top 200 holds 5 and its top 800 holds 24; XGBoost's hold 69
+  and 135.
+- **The timings are reliable.** Splitting each schedule's five repeats in
+  two, the halves agree at Spearman 0.996 overall and 0.829 within the
+  fastest decile, while the models reach 0.43 there: the models, not the
+  measurements, are what limit the ranking of the best schedules.
+
+Results with provenance are in `results/jetson_nano_confirm/` (`summary.json`,
+`paired.csv`, `scores.csv`, `learning_curve.csv`, `draft.csv`, `noise.csv`).
+
 ## Running it
 
 Use the pinned dependencies on the development machine (not on the Nano):
@@ -319,7 +374,8 @@ PYTHONPATH=src python scripts/retime_nano_test.py --rpc-host 127.0.0.1 \
 One FP32 matrix size on one device. The 5,000 schedules are a uniform sample
 of 3,704,400, while a real search concentrates on good candidates. The TEST
 set holds only ten "fastest ten" schedules, so top-of-ranking intervals are
-wide, and one TEST set serves every analysis. CPU clocks are not pinned
+wide, and one TEST set serves every analysis; the 20,000-schedule
+confirmation set addresses both. CPU clocks are not pinned
 (`schedutil` governor); in the second timing 21% of schedules moved by more
 than 5% while their ranking held, and the first repeats of a schedule run
 slightly slow. Analytical features are estimates and omit hardware counters.
