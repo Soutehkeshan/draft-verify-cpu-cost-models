@@ -45,3 +45,18 @@ def test_paired_table_has_a_row_per_metric_with_both_models_and_the_difference()
     assert rows[1] == r"Spearman $\rho$ & 0.900 & 0.910 & +0.010 [0.000, +0.020] \\"
     assert len(rows) == 6  # header + five metrics; per-sketch rows are not used
     assert "9.000" not in text
+
+
+def test_confirmation_table_puts_the_original_and_the_new_gain_side_by_side():
+    tables = _tables()
+    original = _paired()
+    confirm = _paired()
+    confirm["metric"] = confirm["metric"].replace({"top_10_recall_in_30": "top_1pct_recall_in_3pct"})
+    confirm["difference_mean_over_seeds"] *= -1
+    text = tables.confirmation_table(original, confirm)
+    rows = [line for line in text.splitlines() if line.endswith(r"\\") and "&" in line]
+    assert rows[0] == r"Metric & 752 schedules & 20,000 new schedules \\"
+    assert rows[1] == r"Spearman $\rho$ & +0.010 [0.000, +0.020] & $-$0.010 [0.000, +0.020] \\"
+    assert rows[3].startswith("Fastest found") and "+0.03 [+0.02, +0.04]" in rows[3]
+    assert len(rows) == 6
+    assert "9.000" not in text

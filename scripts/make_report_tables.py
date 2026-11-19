@@ -4,7 +4,9 @@
 Reads results/jetson_nano and writes three tabulars to Report/tables/: main.tex
 (the five scorers on TEST), paired.tex (XGBoost with and without the analytical
 features, seed-paired) and ablation.tex (the fitted analytic model with each
-penalty removed). Values are copied and rounded, never recomputed or typed.
+penalty removed). When results/jetson_nano_confirm exists it also writes
+confirm.tex: the gain from the analytical features on the original TEST set
+next to the gain on the confirmation schedules. Values are copied and rounded, never recomputed or typed.
 XGBoost rows are means over the five training seeds (learning_curve_summary.csv
 at full TRAIN, 2,000 TEST resamples); analytic and random rows come from
 evaluation.csv. Each file starts with a comment naming its sources and the
@@ -22,6 +24,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "jetson_nano"
+CONFIRM = ROOT / "results" / "jetson_nano_confirm"
 SCORERS = (
     ("random", "Random"),
     ("analytic(hand_set)", "Analytic, hand-set"),
@@ -41,6 +44,14 @@ PAIRED_METRICS = (
     ("top_10_recall_in_30", "Top-10 in 30", 2),
     ("top_1_latency_ratio", "Top-1 ratio", 3),
     ("top_5_latency_ratio", "Top-5 ratio", 3),
+)
+# (label, metric on the original 752 TEST schedules, metric on the 20,000 new ones, decimals)
+CONFIRM_METRICS = (
+    (r"Spearman $\rho$", "spearman", "spearman", 3),
+    (r"Fastest-decile $\rho$", "fastest_decile_spearman", "fastest_decile_spearman", 3),
+    ("Fastest found", "top_10_recall_in_30", "top_1pct_recall_in_3pct", 2),
+    ("Top-1 ratio", "top_1_latency_ratio", "top_1_latency_ratio", 3),
+    ("Top-5 ratio", "top_5_latency_ratio", "top_5_latency_ratio", 3),
 )
 ABLATIONS = (
     ("analytic(fitted)", "All penalties"),
@@ -110,6 +121,26 @@ def paired_table(paired: pd.DataFrame) -> str:
     return "\n".join(lines) + "\n"
 
 
+def confirmation_table(original: pd.DataFrame, confirm: pd.DataFrame) -> str:
+    """The gain from the analytical features on the original TEST set and on the new schedules."""
+    lines = [
+        r"\begin{tabular}{@{}lcc@{}}",
+        r"\hline",
+        r"Metric & 752 schedules & 20,000 new schedules \\",
+        r"\hline",
+    ]
+    tables = [frame[frame["scope"] == "pooled"].set_index("metric") for frame in (original, confirm)]
+    for label, old_metric, new_metric, digits in CONFIRM_METRICS:
+        cells = [
+            interval(row["difference_mean_over_seeds"], row["paired_bootstrap_ci_low"],
+                     row["paired_bootstrap_ci_high"], digits, signed=True)
+            for row in (tables[0].loc[old_metric], tables[1].loc[new_metric])
+        ]
+        lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+    lines += [r"\hline", r"\end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
 def ablation_table(ablations: pd.DataFrame) -> str:
     lines = [
         r"\begin{tabular}{@{}lccc@{}}",
@@ -160,6 +191,10 @@ def main() -> None:
                 [RESULTS / "evaluation.csv", RESULTS / "learning_curve_summary.csv"])
     write_table(out / "paired.tex", paired_table(read("paired_comparison.csv")), [RESULTS / "paired_comparison.csv"])
     write_table(out / "ablation.tex", ablation_table(read("ablations.csv")), [RESULTS / "ablations.csv"])
+    if (CONFIRM / "paired.csv").is_file():
+        write_table(out / "confirm.tex", confirmation_table(read("paired_comparison.csv"),
+                                                           pd.read_csv(CONFIRM / "paired.csv")),
+                    [RESULTS / "paired_comparison.csv", CONFIRM / "paired.csv"])
 
 
 if __name__ == "__main__":
