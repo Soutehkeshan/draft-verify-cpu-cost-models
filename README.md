@@ -299,7 +299,7 @@ TRAIN, five seed pairs, 95% paired range from 2,000 resamples):
 | Top-5 latency ratio (not primary) | −0.065 [−0.156, +0.016] | +0.146 [−0.041, +0.325] | no |
 
 - **The overall gain is real and now precise.** +0.005 against +0.006
-  before, with a range ten times narrower; all five seeds improve, and the
+  before, with a range five times narrower; all five seeds improve, and the
   gain holds in each of the three sketches separately.
 - **The larger gains near the top did not hold.** With about 200 schedules
   in the fastest 1% instead of ten, the hybrid finds the best schedules no
