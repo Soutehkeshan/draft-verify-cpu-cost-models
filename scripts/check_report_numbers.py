@@ -13,7 +13,7 @@ are digits inside names such as A57.
 Sources: every CSV and JSON file in results/jetson_nano (models/ excluded)
 and results/jetson_nano_confirm, the run, collection and re-timing metadata
 and the collection report in data/jetson_nano/, the confirmation run's
-metadata and batch log in data/jetson_nano_confirm/, the profiles in
+metadata, session note and batch log in data/jetson_nano_confirm/, the profiles in
 configs/, and the sizes of the split lists. Every .tex file under Report/ is checked, tables included.
 Prints each mismatch as path:line and exits 1 if there is any.
 """
@@ -250,7 +250,7 @@ def load_sources(root: Path = ROOT, include_per_seed: bool = False) -> Sources:
     for path in (path for directory in RESULT_DIRS for path in sorted((root / directory).glob("*.json"))):
         _walk(json.loads(path.read_text(encoding="utf-8")), path.relative_to(root).as_posix(), values)
     for name in ("data/jetson_nano/run_meta.json", "data/jetson_nano/test_retime_meta.json",
-                 "data/jetson_nano_confirm/run_meta.json"):
+                 "data/jetson_nano_confirm/run_meta.json", "data/jetson_nano_confirm/sessions_note.json"):
         path = root / name
         if path.is_file():
             _walk(json.loads(path.read_text(encoding="utf-8")), name, values)

@@ -108,3 +108,14 @@ def test_confirmation_results_are_sources_and_their_learning_curve_is_not_per_se
     assert sources.match(gain) == "results/jetson_nano_confirm/paired.csv:difference"
     assert sources.match(curve) == "results/jetson_nano_confirm/learning_curve.csv:difference"
     assert sources.match(per_seed) is None
+
+
+def test_the_confirmation_session_note_is_a_source(tmp_path):
+    checker = _checker()
+    data = tmp_path / "data" / "jetson_nano_confirm"
+    data.mkdir(parents=True)
+    (data / "sessions_note.json").write_text('{"rpc_sessions": [{"schedules": 15059}], "max_abs_canary_drift_fraction": 0.0378}')
+    count, drift = checker.extract_numbers(r"15,059 and 3.8\%")
+    sources = checker.load_sources(tmp_path)
+    assert sources.match(count) == "data/jetson_nano_confirm/sessions_note.json.rpc_sessions[0].schedules"
+    assert sources.match(drift) == "data/jetson_nano_confirm/sessions_note.json.max_abs_canary_drift_fraction"
