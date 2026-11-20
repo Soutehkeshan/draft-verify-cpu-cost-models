@@ -53,10 +53,17 @@ configs/workloads/matmul_fp32_512.json   matrix size, dtype, seed, timing repeat
 src/dvcm/                           shared library
 scripts/                            the programs (numbered = main pipeline)
 tests/                              unit tests (no Nano needed)
-data/jetson_nano/                   the measured dataset (not in Git)
-results/jetson_nano/                everything computed from it (not in Git)
+data/jetson_nano/                   the measured dataset (not in Git; in the release)
+results/jetson_nano/                everything computed from it (not in Git; in the release, without models/)
+data/jetson_nano_confirm/           the 20,000 confirmation timings (not in Git; in the release)
+results/jetson_nano_confirm/        the confirmation results (not in Git; in the release)
 Report/                             the LaTeX report and its generated tables and figures (not in Git)
 ```
+
+The data and results are attached to the GitHub release that matches the tag
+(`jetson_nano_dataset_v3.0.zip` and `jetson_nano_results_v3.0.zip` for
+`v3.0`); unzip both at the repository root. The trained models are not
+included; `make eval` rebuilds them exactly.
 
 **Library (`src/dvcm/`)**
 
@@ -86,6 +93,8 @@ Report/                             the LaTeX report and its generated tables an
 | `02_fit_analytic.py` | Fit the analytical model's two constants on TRAIN | `constants.json` |
 | `03_train.py` | Choose XGBoost settings on VALIDATION; train 5 seeds × 6 TRAIN sizes × 2 feature sets | `training_grid.json`, `models/` |
 | `04_evaluate.py` | Score everything on TEST | `evaluation.csv` and the files listed below |
+| `sample_confirmation_pool.py` | Draw 20,000 new schedules, none in the original pool, for the confirmation TEST set | `data/jetson_nano_confirm/source/` |
+| `evaluate_confirmation.py` | Score the frozen models on the confirmation set (`make confirm`) | `results/jetson_nano_confirm/` |
 | `check_shuffled_label_null.py` | Leakage check: train on shuffled labels, 120 times | `shuffled_label_null_extended*.csv` |
 | `make_report_tables.py`, `make_report_figures.py` | Report tables and figures from the result files | `Report/tables/`, `Report/figures/` |
 | `check_report_numbers.py` | Check every number in `Report/*.tex` against the result files | — |
